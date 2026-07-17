@@ -10,6 +10,7 @@ from tlc_data_platform.bronze.models import (
     AvailabilityRecord,
     DiscoveryResult,
     FileCandidate,
+    classify_remote_availability,
 )
 from tlc_data_platform.core.settings import AppConfig
 from tlc_data_platform.ingestion.expected_periods import generate_expected_periods
@@ -92,7 +93,7 @@ class FileDiscovery:
                         service=period.service,
                         year=period.year,
                         month=period.month,
-                        status="DISCOVERED",
+                        status="AVAILABLE",
                         applicable=True,
                         expected=True,
                         candidate_url=candidate.url,
@@ -103,13 +104,9 @@ class FileDiscovery:
 
             candidate = self._deterministic_candidate(period.service, period.year, period.month)
             remote = self._probe.probe(candidate.url)
-            if remote.available:
+            status = classify_remote_availability(remote)
+            if status == "AVAILABLE":
                 candidates[key] = candidate
-                status = "AVAILABLE"
-            elif remote.probe_failed:
-                status = "FAILED_TO_PROBE"
-            else:
-                status = "NOT_PUBLISHED_YET"
             availability.append(
                 AvailabilityRecord(
                     execution_id=execution_id,

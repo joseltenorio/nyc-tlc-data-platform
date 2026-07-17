@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nyc-tlc-data-platform"
-version = "1.1.0"
+version = "2.0.0"
 description = "End-to-end NYC TLC data platform built with PySpark and MongoDB, featuring automated Medallion pipelines, data auditing, dimensional modeling, BI dashboards, and predictive models."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "beautifulsoup4>=4.13,<5",
   "pyarrow>=18,<22",

@@ -1,0 +1,56 @@
+storage:
+  silver_root: data/silver
+  datasets:
+    yellow: yellow_trips
+    green: green_trips
+    fhv: fhv_trips
+    fhvhv: hvfhv_trips
+  master_dataset: trips_master
+  rejected_dataset: rejected_records
+  taxi_zones_dataset: taxi_zones
+  base_lookup_dataset: base_lookup
+  temporary_root: data/tmp/silver
+  manifests_root: data/manifests/silver
+
+execution:
+  require_bronze_ready_registry: true
+  continue_on_file_error: true
+  parquet_compression: snappy
+  build_master: true
+  require_reference_data: true
+  refresh_references_if_missing: true
+  refresh_references_before_run: false
+  claim_ttl_minutes: 360
+
+quality:
+  valid_location_id_min: 1
+  valid_location_id_max: 265
+  taxi_max_duration_hours: 12
+  fhv_max_duration_hours: 24
+  max_passenger_count: 7
+  max_trip_distance_miles: 1000
+  max_total_amount: 400
+  impute_zero_or_null_passenger_count: true
+  reject_zero_distance: false
+  reject_negative_component_amounts: true
+  allowed_store_and_forward_flags: [Y, N]
+  allowed_boolean_flags: [Y, N]
+
+spark:
+  app_name: nyc-tlc-data-platform-silver
+  master: local[*]
+  log_level: WARN
+  driver_memory: 6g
+  shuffle_partitions: 200
+
+references:
+  bronze_root: data/bronze/reference
+  taxi_zones_url: https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv
+  base_lookup_url: https://data.cityofnewyork.us/resource/eccv-9dzr.csv?$limit=50000
+  request_timeout_seconds: 60
+
+mongo_collections:
+  pipeline_executions: silver_pipeline_executions
+  file_registry: silver_file_registry
+  quality_results: silver_quality_results
+  reconciliations: silver_reconciliations

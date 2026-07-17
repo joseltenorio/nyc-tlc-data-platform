@@ -16,3 +16,10 @@ class ParquetValidationError(TLCPlatformError):
 
 class InsufficientDiskSpaceError(TLCPlatformError):
     """Raised when the local filesystem cannot safely receive the download."""
+
+class SilverTransformationError(TLCPlatformError):
+    """Raised when a Bronze partition cannot be transformed to Silver."""
+
+
+class SilverReconciliationError(TLCPlatformError):
+    """Raised when Bronze and Silver row counts cannot be reconciled."""

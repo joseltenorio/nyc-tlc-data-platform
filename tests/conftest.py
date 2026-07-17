@@ -25,4 +25,35 @@ def app_config(tmp_path: Path):
         initial_backoff_seconds=0,
         max_backoff_seconds=0,
     )
-    return replace(config, storage=storage, download=download)
+    silver_storage = replace(
+        config.silver.storage,
+        silver_root=tmp_path / "silver",
+        temporary_root=tmp_path / "tmp" / "silver",
+        manifests_root=tmp_path / "manifests" / "silver",
+    )
+    silver_references = replace(
+        config.silver.references,
+        bronze_root=tmp_path / "bronze" / "reference",
+    )
+    silver = replace(
+        config.silver,
+        storage=silver_storage,
+        references=silver_references,
+    )
+    return replace(config, storage=storage, download=download, silver=silver)
+
+@pytest.fixture(scope="session")
+def spark():
+    pytest.importorskip("pyspark")
+    from pyspark.sql import SparkSession
+
+    session = (
+        SparkSession.builder.master("local[1]")
+        .appName("nyc-tlc-data-platform-tests")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.sql.session.timeZone", "America/New_York")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()

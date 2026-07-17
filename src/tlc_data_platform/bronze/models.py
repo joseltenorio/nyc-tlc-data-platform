@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+DEFERRED_REMOTE_ACCESS = "DEFERRED_REMOTE_ACCESS"
+NOT_PUBLISHED_STATUS_CODES = frozenset({404, 410})
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -56,6 +59,16 @@ class RemoteMetadata:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def classify_remote_availability(remote: RemoteMetadata) -> str:
+    if remote.available:
+        return "AVAILABLE"
+    if remote.probe_failed:
+        return "FAILED_TO_PROBE"
+    if remote.status_code in NOT_PUBLISHED_STATUS_CODES:
+        return "NOT_PUBLISHED_YET"
+    return DEFERRED_REMOTE_ACCESS
 
 
 @dataclass

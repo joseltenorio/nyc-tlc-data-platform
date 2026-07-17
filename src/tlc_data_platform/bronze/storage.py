@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from tlc_data_platform.bronze.models import FileCandidate
 from tlc_data_platform.core.settings import StorageConfig
+
+TEMPORARY_FILE_PATTERN = re.compile(
+    r"^(?P<file_name>.+\.parquet)\.(?P<execution_id>[^.]+)\.part$"
+)
 
 
 class BronzeStorage:
@@ -67,6 +72,28 @@ class BronzeStorage:
 
     def discard_temporary(self, candidate: FileCandidate, execution_id: str) -> None:
         self.temporary_path(candidate, execution_id).unlink(missing_ok=True)
+
+    def temporary_entries(self) -> list[tuple[Path, str]]:
+        entries: list[tuple[Path, str]] = []
+        self._config.temporary_root.mkdir(parents=True, exist_ok=True)
+        for path in self._config.temporary_root.glob("*.part"):
+            match = TEMPORARY_FILE_PATTERN.match(path.name)
+            if match is None:
+                continue
+            entries.append((path, match.group("execution_id")))
+        return entries
+
+    def discard_temporary_path(self, path: Path) -> None:
+        path.unlink(missing_ok=True)
+
+    def discard_temporary_for_execution(self, execution_id: str) -> int:
+        removed = 0
+        for path, owner_execution_id in self.temporary_entries():
+            if owner_execution_id != execution_id:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        return removed
 
     def free_space_bytes(self) -> int:
         target = self._config.temporary_root

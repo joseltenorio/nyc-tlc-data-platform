@@ -9,6 +9,7 @@ from pathlib import Path
 from tlc_data_platform.audit.summaries import AuditRepositories
 from tlc_data_platform.bronze.models import (
     AvailabilityRecord,
+    DEFERRED_REMOTE_ACCESS,
     DiscoveryResult,
     DownloadResult,
     ExpectedPeriod,
@@ -18,6 +19,7 @@ from tlc_data_platform.bronze.models import (
 )
 from tlc_data_platform.bronze.pipeline import BronzePipeline
 from tlc_data_platform.bronze.storage import BronzeStorage
+from tlc_data_platform.core.exceptions import DownloadError
 from tlc_data_platform.core.settings import resolve_selection
 
 
@@ -53,7 +55,7 @@ class FakeDiscovery:
                 service=c.service,
                 year=c.year,
                 month=c.month,
-                status="DISCOVERED",
+                status="AVAILABLE",
                 applicable=True,
                 expected=True,
                 candidate_url=c.url,
@@ -159,6 +161,12 @@ class FakeExecutions:
     def fail(self, *args):
         self.failed.append(args)
 
+    def get(self, execution_id):
+        return None
+
+    def is_active(self, execution_id):
+        return False
+
 
 class FakeAvailability:
     def __init__(self):
@@ -212,8 +220,17 @@ class FakeRegistry:
         self.docs[self._key(outcome.candidate)] = {"status": "FAILED"}
         self.claims.discard(self._key(outcome.candidate))
 
+    def mark_deferred(self, outcome, execution_id):
+        self.docs[self._key(outcome.candidate)] = {"status": outcome.status}
+        self.claims.discard(self._key(outcome.candidate))
+
     def release_claim(self, candidate, execution_id):
         self.claims.discard(self._key(candidate))
+
+    def release_claims_for_execution(self, execution_id):
+        released = len(self.claims)
+        self.claims.clear()
+        return released
 
 
 class FakeVersions:
@@ -311,10 +328,11 @@ def test_reeecution_skips_unchanged_file(app_config):
 def test_checksum_change_archives_previous_file(app_config):
     audit = fake_audit()
     probe = FakeProbe(RemoteMetadata(True, 200, 16, etag="etag-new"))
+    fallback_candidate = replace(candidate(), discovery_method="deterministic_fallback")
     pipeline, audit, downloader, storage = make_pipeline(
-        app_config, [candidate()], audit=audit, probe=probe
+        app_config, [fallback_candidate], audit=audit, probe=probe
     )
-    destination = storage.final_path(candidate())
+    destination = storage.final_path(fallback_candidate)
     destination.parent.mkdir(parents=True)
     destination.write_bytes(b"old")
     audit.registry.docs[("yellow", 2026, 1)] = {
@@ -424,6 +442,66 @@ def test_force_downloads_even_when_remote_metadata_is_unchanged(app_config):
     summary = pipeline.run(selection, execution_type="incremental", force=True)
     assert downloader.calls == 1
     assert summary.ready_files == 1
+
+
+def test_ready_without_physical_file_is_reprocessed(app_config):
+    audit = fake_audit()
+    pipeline, audit, downloader, _ = make_pipeline(app_config, [candidate()], audit=audit)
+    audit.registry.docs[("yellow", 2026, 1)] = {
+        "current": {
+            "status": "READY",
+            "sha256": "oldsha",
+            "bytes_downloaded": 16,
+            "local_path": "data/bronze/trip_records/yellow/year=2026/month=01/yellow_tripdata_2026-01.parquet",
+            "remote_metadata": {"etag": "etag-new", "content_length": 16},
+        }
+    }
+    selection = resolve_selection(app_config, mode="incremental", services=["yellow"], months=[1])
+    summary = pipeline.run(selection, execution_type="incremental")
+    assert downloader.calls == 1
+    assert summary.ready_files == 1
+
+
+def test_download_failure_releases_claim_and_cleans_temporary(app_config):
+    storage = BronzeStorage(app_config.storage)
+    downloader = FakeDownloader(storage, fail_months=[1])
+    pipeline, audit, _, _ = make_pipeline(
+        app_config,
+        [candidate()],
+        downloader=downloader,
+    )
+    selection = resolve_selection(app_config, mode="incremental", services=["yellow"], months=[1])
+    summary = pipeline.run(selection, execution_type="incremental")
+    assert summary.failed_files == 1
+    assert audit.registry.claims == set()
+    assert list(app_config.storage.temporary_root.glob("*.part")) == []
+
+
+def test_consecutive_temporary_blocks_defer_remaining_downloads(app_config):
+    class BlockingDownloader(FakeDownloader):
+        def download(self, candidate, execution_id, remote):
+            self.calls += 1
+            raise DownloadError("El servidor devolvió HTML en lugar de Parquet")
+
+    storage = BronzeStorage(app_config.storage)
+    downloader = BlockingDownloader(storage)
+    pipeline, _, _, _ = make_pipeline(
+        app_config,
+        [candidate(1), candidate(2), candidate(3)],
+        downloader=downloader,
+    )
+    selection = resolve_selection(
+        app_config,
+        mode="incremental",
+        services=["yellow"],
+        months=[1, 2, 3],
+        workers=1,
+    )
+    summary = pipeline.run(selection, execution_type="incremental")
+    manifest = Path(summary.manifest_path).read_text(encoding="utf-8")
+    assert downloader.calls == 2
+    assert summary.status == "PARTIAL_SUCCESS"
+    assert DEFERRED_REMOTE_ACCESS in manifest
 
 
 def test_atomic_claim_allows_only_one_worker():

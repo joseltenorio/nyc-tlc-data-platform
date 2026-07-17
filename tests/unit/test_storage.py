@@ -53,3 +53,25 @@ def test_same_checksum_does_not_archive(app_config):
     final, archived = storage.promote(temporary, candidate(), "sha", "sha")
     assert archived is None
     assert final.read_bytes() == b"same"
+
+
+def test_lists_temporary_entries(app_config):
+    storage = BronzeStorage(app_config.storage)
+    temporary = storage.temporary_path(candidate(), "run-1")
+    temporary.parent.mkdir(parents=True)
+    temporary.write_bytes(b"PAR1abcdefghPAR1")
+    entries = storage.temporary_entries()
+    assert entries == [(temporary, "run-1")]
+
+
+def test_discards_temporary_for_execution(app_config):
+    storage = BronzeStorage(app_config.storage)
+    first = storage.temporary_path(candidate(), "run-1")
+    second = storage.temporary_path(candidate(), "run-2")
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"PAR1abcdefghPAR1")
+    second.write_bytes(b"PAR1abcdefghPAR1")
+    removed = storage.discard_temporary_for_execution("run-1")
+    assert removed == 1
+    assert not first.exists()
+    assert second.exists()

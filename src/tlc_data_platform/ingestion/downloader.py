@@ -21,6 +21,18 @@ def has_parquet_signature(path: Path) -> bool:
     return start == b"PAR1" and end == b"PAR1"
 
 
+def response_metadata(response) -> RemoteMetadata:
+    content_length = response.headers.get("Content-Length")
+    return RemoteMetadata(
+        available=response.status_code in {200, 206},
+        status_code=response.status_code,
+        content_length=int(content_length) if content_length and content_length.isdigit() else None,
+        etag=response.headers.get("ETag"),
+        last_modified=response.headers.get("Last-Modified"),
+        content_type=response.headers.get("Content-Type"),
+    )
+
+
 class FileDownloader:
     DOWNLOAD_RETRYABLE_STATUS_CODES = (
         HttpClient.RETRYABLE_STATUS_CODES | {403}
@@ -67,6 +79,7 @@ class FileDownloader:
         try:
             response.raise_for_status()
             content_type = (response.headers.get("Content-Type") or "").lower()
+            effective_remote_metadata = response_metadata(response)
             with temporary.open("wb") as handle:
                 for chunk in response.iter_content(self._config.chunk_size_bytes):
                     if chunk:
@@ -103,5 +116,5 @@ class FileDownloader:
             path=temporary,
             bytes_downloaded=size,
             sha256=sha256,
-            remote_metadata=remote_metadata,
+            remote_metadata=effective_remote_metadata,
         )

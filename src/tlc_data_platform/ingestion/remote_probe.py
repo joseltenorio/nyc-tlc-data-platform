@@ -18,6 +18,11 @@ def _metadata(response: requests.Response, available: bool) -> RemoteMetadata:
     )
 
 
+def _is_html_response(response: requests.Response) -> bool:
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    return "text/html" in content_type
+
+
 class RemoteProbe:
     def __init__(self, http: HttpClient) -> None:
         self._http = http
@@ -26,12 +31,14 @@ class RemoteProbe:
         try:
             response = self._http.request("HEAD", url, allow_redirects=True)
             try:
-                if response.status_code == 200:
+                if response.status_code == 200 and not _is_html_response(response):
                     return _metadata(response, True)
                 if response.status_code in {404, 410}:
                     return _metadata(response, False)
-                if response.status_code not in {403, 405}:
-                    response.raise_for_status()
+                if response.status_code not in {202, 403, 405} and not _is_html_response(
+                    response
+                ):
+                    return _metadata(response, False)
             finally:
                 response.close()
 
@@ -43,9 +50,9 @@ class RemoteProbe:
                 allow_redirects=True,
             )
             try:
-                available = response.status_code in {200, 206}
-                if not available and response.status_code not in {404, 410}:
-                    response.raise_for_status()
+                available = response.status_code in {200, 206} and not _is_html_response(
+                    response
+                )
                 return _metadata(response, available)
             finally:
                 response.close()

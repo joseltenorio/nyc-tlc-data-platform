@@ -9,15 +9,31 @@ htmlcov/
 *.log
 .ipynb_checkpoints/
 
-# Runtime data
+# Bronze runtime data
 data/bronze/trip_records/**/*.parquet
 data/bronze/versions/trip_records/**/*.parquet
-data/tmp/*
+data/bronze/reference/**/*.csv
+data/bronze/reference/**/*.parquet
+
+# Silver runtime data
+data/silver/**/*.parquet
+data/silver/**/_SUCCESS
+data/silver/**/*.crc
+
+# Temporary files and manifests
+data/tmp/**
 data/manifests/*.json
-!data/.gitkeep
-!data/bronze/.gitkeep
+data/manifests/silver/*.json
+
+# Preserve only directory markers
 !data/bronze/trip_records/.gitkeep
-!data/bronze/versions/.gitkeep
 !data/bronze/versions/trip_records/.gitkeep
-!data/manifests/.gitkeep
-!data/tmp/.gitkeep
+!data/bronze/reference/taxi_zones/.gitkeep
+!data/bronze/reference/base_lookup/.gitkeep
+!data/silver/**/.gitkeep
+!data/tmp/
+!data/tmp/silver/
+!data/tmp/silver/.gitkeep
+!data/manifests/
+!data/manifests/silver/
+!data/manifests/silver/.gitkeep

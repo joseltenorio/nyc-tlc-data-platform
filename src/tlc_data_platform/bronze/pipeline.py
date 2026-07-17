@@ -7,6 +7,8 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from tlc_data_platform.audit.availability_repository import AvailabilityRepository
 from tlc_data_platform.audit.execution_repository import ExecutionRepository
 from tlc_data_platform.audit.file_registry_repository import FileRegistryRepository
@@ -15,15 +17,18 @@ from tlc_data_platform.audit.summaries import AuditRepositories
 from tlc_data_platform.bronze.manifest import ManifestWriter
 from tlc_data_platform.bronze.models import (
     AvailabilityRecord,
+    DEFERRED_REMOTE_ACCESS,
     DownloadResult,
     ExecutionSummary,
     FileCandidate,
     FileOutcome,
     PlanSummary,
     RemoteMetadata,
+    classify_remote_availability,
     utc_now,
 )
 from tlc_data_platform.bronze.storage import BronzeStorage
+from tlc_data_platform.core.exceptions import DownloadError
 from tlc_data_platform.core.settings import AppConfig, RunSelection
 from tlc_data_platform.core.spark import SparkProvider
 from tlc_data_platform.ingestion.discovery import FileDiscovery
@@ -79,12 +84,14 @@ class BronzePipeline:
             database = self._mongo_provider.database()
             MongoIndexManager(database, self._config.mongo).ensure_indexes()
             names = self._config.mongo.collections
+            executions = ExecutionRepository(database[names.pipeline_executions])
             self._audit = AuditRepositories(
-                executions=ExecutionRepository(database[names.pipeline_executions]),
+                executions=executions,
                 availability=AvailabilityRepository(database[names.file_availability]),
                 registry=FileRegistryRepository(
                     database[names.file_registry],
                     self._config.download.claim_ttl_minutes,
+                    execution_repository=executions,
                 ),
                 versions=FileVersionRepository(database[names.file_versions]),
             )
@@ -156,6 +163,13 @@ class BronzePipeline:
         failed_probes = sum(item.status == "FAILED_TO_PROBE" for item in availability)
         if failed_probes:
             warnings.append(f"{failed_probes} periodo(s) no pudieron verificarse por red.")
+        deferred_periods = sum(
+            item.status == DEFERRED_REMOTE_ACCESS for item in availability
+        )
+        if deferred_periods:
+            warnings.append(
+                f"{deferred_periods} periodo(s) quedaron diferidos por acceso remoto temporal."
+            )
 
         available_files = sum(item.status == "AVAILABLE" for item in availability)
         pending = max(0, available_files - already_processed)
@@ -199,6 +213,7 @@ class BronzePipeline:
         )
         self._storage.ensure_directories()
         audit = self._ensure_audit()
+        self._cleanup_orphan_temporary_files(audit)
         manifest = ManifestWriter(self._config.storage.manifests_root, execution_id)
         audit.executions.start(
             execution_id,
@@ -351,6 +366,7 @@ class BronzePipeline:
                     manifest_path = str(manifest.write(failed_summary))
                 except OSError:
                     LOGGER.exception("No se pudo escribir el manifiesto de error")
+            self._cleanup_execution_state(audit, execution_id)
             audit.executions.fail(
                 execution_id, finished_at, exc, manifest_path
             )
@@ -363,11 +379,22 @@ class BronzePipeline:
     ) -> dict[str, RemoteMetadata]:
         if not candidates:
             return {}
-        result: dict[str, RemoteMetadata] = {}
+        result: dict[str, RemoteMetadata] = {
+            candidate.period_id: RemoteMetadata(True)
+            for candidate in candidates
+            if candidate.discovery_method == "html"
+        }
+        probe_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.discovery_method != "html"
+        ]
+        if not probe_candidates:
+            return result
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(self._probe.probe, candidate.url): candidate
-                for candidate in candidates
+                for candidate in probe_candidates
             }
             for future in as_completed(futures):
                 candidate = futures[future]
@@ -392,13 +419,8 @@ class BronzePipeline:
             if remote is None or item.status == "NOT_APPLICABLE":
                 merged.append(item)
                 continue
-            if remote.available:
-                status = "AVAILABLE"
-            elif remote.probe_failed:
-                status = "FAILED_TO_PROBE"
-            else:
-                status = "NOT_PUBLISHED_YET"
-            item.status = status
+            if item.discovery_method != "html":
+                item.status = classify_remote_availability(remote)
             item.remote_metadata = remote
             merged.append(item)
         return merged
@@ -446,6 +468,39 @@ class BronzePipeline:
                     semaphore.release()
 
         max_workers = selection.workers if self._config.download.parallel_enabled else 1
+        if max_workers == 1:
+            consecutive_deferred = 0
+            for index, (candidate, remote, existing) in enumerate(pending):
+                try:
+                    downloaded.append(task(candidate, remote, existing))
+                    consecutive_deferred = 0
+                except Exception as exc:
+                    outcome = self._failure_outcome(candidate, exc)
+                    self._storage.discard_temporary(candidate, execution_id)
+                    if outcome.status == DEFERRED_REMOTE_ACCESS:
+                        audit.registry.mark_deferred(outcome, execution_id)
+                        consecutive_deferred += 1
+                    else:
+                        audit.registry.mark_failed(outcome, execution_id)
+                        consecutive_deferred = 0
+                    failures.append(outcome)
+                    if consecutive_deferred >= 2:
+                        for deferred_candidate, deferred_remote, _ in pending[index + 1 :]:
+                            deferred = FileOutcome(
+                                candidate=deferred_candidate,
+                                status=DEFERRED_REMOTE_ACCESS,
+                                remote_metadata=deferred_remote,
+                            )
+                            deferred.error_type = "RemoteAccessDeferred"
+                            deferred.error_message = (
+                                "Se abrió un corte preventivo tras bloqueos remotos consecutivos."
+                            )
+                            deferred.finish()
+                            audit.registry.mark_deferred(deferred, execution_id)
+                            failures.append(deferred)
+                        break
+            return downloaded, failures
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map: dict[
                 Future[tuple[DownloadResult, dict[str, Any] | None]],
@@ -459,12 +514,12 @@ class BronzePipeline:
                 try:
                     downloaded.append(future.result())
                 except Exception as exc:
-                    outcome = FileOutcome(candidate=candidate, status="FAILED")
-                    outcome.error_type = type(exc).__name__
-                    outcome.error_message = str(exc)
-                    outcome.finish()
+                    outcome = self._failure_outcome(candidate, exc)
                     self._storage.discard_temporary(candidate, execution_id)
-                    audit.registry.mark_failed(outcome, execution_id)
+                    if outcome.status == DEFERRED_REMOTE_ACCESS:
+                        audit.registry.mark_deferred(outcome, execution_id)
+                    else:
+                        audit.registry.mark_failed(outcome, execution_id)
                     failures.append(outcome)
         return downloaded, failures
 
@@ -548,6 +603,9 @@ class BronzePipeline:
     ) -> ExecutionSummary:
         finished_at = utc_now()
         failed = sum(outcome.status == "FAILED" for outcome in outcomes)
+        deferred = sum(
+            outcome.status == DEFERRED_REMOTE_ACCESS for outcome in outcomes
+        ) + sum(item.status == DEFERRED_REMOTE_ACCESS for item in availability)
         failed_probes = sum(item.status == "FAILED_TO_PROBE" for item in availability)
         successes = sum(
             outcome.status in {"READY", "SKIPPED_UNCHANGED", "DRY_RUN"}
@@ -558,7 +616,7 @@ class BronzePipeline:
             status = "PARTIAL_SUCCESS"
         elif failed:
             status = "FAILED"
-        elif failed_probes:
+        elif deferred or failed_probes:
             status = "PARTIAL_SUCCESS"
         summary = self._build_summary(
             execution_id,
@@ -573,6 +631,7 @@ class BronzePipeline:
             str(manifest.path),
         )
         manifest.write(summary)
+        self._cleanup_execution_state(audit, execution_id)
         audit.executions.finish(summary)
         return summary
 
@@ -629,6 +688,81 @@ class BronzePipeline:
         )
 
     @staticmethod
+    def _failure_outcome(candidate: FileCandidate, exc: Exception) -> FileOutcome:
+        outcome = FileOutcome(
+            candidate=candidate,
+            status=(
+                DEFERRED_REMOTE_ACCESS
+                if BronzePipeline._is_temporary_remote_failure(exc)
+                else "FAILED"
+            ),
+        )
+        outcome.error_type = type(exc).__name__
+        outcome.error_message = str(exc)
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            outcome.remote_metadata = RemoteMetadata(
+                available=False,
+                status_code=exc.response.status_code,
+                content_length=None,
+                etag=exc.response.headers.get("ETag"),
+                last_modified=exc.response.headers.get("Last-Modified"),
+                content_type=exc.response.headers.get("Content-Type"),
+            )
+        outcome.finish()
+        return outcome
+
+    @staticmethod
+    def _is_temporary_remote_failure(exc: Exception) -> bool:
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            return exc.response.status_code in {202, 403, 429, 500, 502, 503, 504}
+        if isinstance(exc, DownloadError):
+            message = str(exc)
+            return any(
+                marker in message
+                for marker in (
+                    "HTML",
+                    "Firma Parquet inválida",
+                    "Archivo incompleto",
+                )
+            )
+        return False
+
+    def _cleanup_orphan_temporary_files(self, audit: AuditRepositories) -> None:
+        removed = 0
+        for path, owner_execution_id in self._storage.temporary_entries():
+            if audit.executions.is_active(owner_execution_id):
+                continue
+            LOGGER.info(
+                "Eliminando temporal huérfano %s de la ejecución %s",
+                path,
+                owner_execution_id,
+            )
+            self._storage.discard_temporary_path(path)
+            removed += 1
+        if removed:
+            LOGGER.info("Se eliminaron %s temporales huérfanos", removed)
+
+    def _cleanup_execution_state(
+        self,
+        audit: AuditRepositories,
+        execution_id: str,
+    ) -> None:
+        released = audit.registry.release_claims_for_execution(execution_id)
+        removed = self._storage.discard_temporary_for_execution(execution_id)
+        if released:
+            LOGGER.info(
+                "Se liberaron %s claim(s) pendientes de la ejecución %s",
+                released,
+                execution_id,
+            )
+        if removed:
+            LOGGER.info(
+                "Se eliminaron %s temporal(es) residuales de la ejecución %s",
+                removed,
+                execution_id,
+            )
+
+    @staticmethod
     def _is_unchanged(
         existing: dict[str, Any] | None,
         destination: Path,
@@ -636,8 +770,13 @@ class BronzePipeline:
     ) -> bool:
         if not existing or not destination.is_file():
             return False
+        if destination.stat().st_size <= 0:
+            return False
         current = existing.get("current") or {}
         if current.get("status") != "READY":
+            return False
+        local_path = current.get("local_path")
+        if local_path is not None and Path(local_path).parts[-4:] != destination.parts[-4:]:
             return False
         previous_remote = current.get("remote_metadata") or {}
         compared = 0

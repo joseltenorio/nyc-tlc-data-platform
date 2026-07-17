@@ -52,3 +52,17 @@ class ExecutionRepository:
                 }
             },
         )
+
+    def get(self, execution_id: str) -> dict[str, Any] | None:
+        return self._collection.find_one(
+            {"execution_id": execution_id},
+            {"_id": 0},
+        )
+
+    def is_active(self, execution_id: str) -> bool:
+        execution = self.get(execution_id)
+        if execution is None:
+            return False
+        if execution.get("finished_at") is not None:
+            return False
+        return execution.get("status") == "RUNNING"

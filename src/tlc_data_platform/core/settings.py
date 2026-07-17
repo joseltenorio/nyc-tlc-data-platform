@@ -120,6 +120,81 @@ class MongoConfig:
 
 
 @dataclass(frozen=True)
+class SilverStorageConfig:
+    silver_root: Path
+    datasets: dict[str, str]
+    master_dataset: str
+    rejected_dataset: str
+    taxi_zones_dataset: str
+    base_lookup_dataset: str
+    temporary_root: Path
+    manifests_root: Path
+
+
+@dataclass(frozen=True)
+class SilverExecutionConfig:
+    require_bronze_ready_registry: bool
+    continue_on_file_error: bool
+    parquet_compression: str
+    build_master: bool
+    require_reference_data: bool
+    refresh_references_if_missing: bool
+    refresh_references_before_run: bool
+    claim_ttl_minutes: int
+
+
+@dataclass(frozen=True)
+class SilverQualityConfig:
+    valid_location_id_min: int
+    valid_location_id_max: int
+    taxi_max_duration_hours: float
+    fhv_max_duration_hours: float
+    max_passenger_count: int
+    max_trip_distance_miles: float
+    max_total_amount: float
+    impute_zero_or_null_passenger_count: bool
+    reject_zero_distance: bool
+    reject_negative_component_amounts: bool
+    allowed_store_and_forward_flags: tuple[str, ...]
+    allowed_boolean_flags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SilverSparkConfig:
+    app_name: str
+    master: str
+    log_level: str
+    driver_memory: str
+    shuffle_partitions: int
+
+
+@dataclass(frozen=True)
+class SilverReferenceConfig:
+    bronze_root: Path
+    taxi_zones_url: str
+    base_lookup_url: str
+    request_timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class SilverMongoCollections:
+    pipeline_executions: str
+    file_registry: str
+    quality_results: str
+    reconciliations: str
+
+
+@dataclass(frozen=True)
+class SilverConfig:
+    storage: SilverStorageConfig
+    execution: SilverExecutionConfig
+    quality: SilverQualityConfig
+    spark: SilverSparkConfig
+    references: SilverReferenceConfig
+    collections: SilverMongoCollections
+
+
+@dataclass(frozen=True)
 class AppConfig:
     project: ProjectConfig
     logging: LoggingConfig
@@ -133,6 +208,7 @@ class AppConfig:
     spark: SparkConfig
     mongo: MongoConfig
     schema_contracts: dict[str, Any]
+    silver: SilverConfig
 
     def enabled_services(self) -> list[str]:
         return sorted(name for name, cfg in self.services.items() if cfg.enabled)
@@ -178,6 +254,7 @@ def load_config(config_dir: str | Path = "config") -> AppConfig:
     source_raw = _read_yaml(root / "tlc_sources.yml")
     bronze_raw = _read_yaml(root / "bronze.yml")
     contracts = _read_yaml(root / "schema_contracts.yml")
+    silver_raw = _read_yaml(root / "silver.yml")
 
     project_raw = _require(app_raw, "project", "app.yml")
     logging_raw = _require(app_raw, "logging", "app.yml")
@@ -191,6 +268,13 @@ def load_config(config_dir: str | Path = "config") -> AppConfig:
     spark_raw = _require(bronze_raw, "spark", "bronze.yml")
     mongo_raw = _require(bronze_raw, "mongo", "bronze.yml")
     collections_raw = _require(mongo_raw, "collections", "mongo")
+    silver_storage_raw = _require(silver_raw, "storage", "silver.yml")
+    silver_datasets_raw = _require(silver_storage_raw, "datasets", "silver.storage")
+    silver_execution_raw = _require(silver_raw, "execution", "silver.yml")
+    silver_quality_raw = _require(silver_raw, "quality", "silver.yml")
+    silver_spark_raw = _require(silver_raw, "spark", "silver.yml")
+    silver_references_raw = _require(silver_raw, "references", "silver.yml")
+    silver_collections_raw = _require(silver_raw, "mongo_collections", "silver.yml")
 
     months = tuple(sorted(set(int(m) for m in _require(period_raw, "months", "period"))))
     if not months or any(month < 1 or month > 12 for month in months):
@@ -352,6 +436,61 @@ def load_config(config_dir: str | Path = "config") -> AppConfig:
                 ),
             ),
         ),
+        silver=SilverConfig(
+            storage=SilverStorageConfig(
+                silver_root=Path(_require(silver_storage_raw, "silver_root", "silver.storage")),
+                datasets={str(k): str(v) for k, v in silver_datasets_raw.items()},
+                master_dataset=str(_require(silver_storage_raw, "master_dataset", "silver.storage")),
+                rejected_dataset=str(_require(silver_storage_raw, "rejected_dataset", "silver.storage")),
+                taxi_zones_dataset=str(_require(silver_storage_raw, "taxi_zones_dataset", "silver.storage")),
+                base_lookup_dataset=str(_require(silver_storage_raw, "base_lookup_dataset", "silver.storage")),
+                temporary_root=Path(_require(silver_storage_raw, "temporary_root", "silver.storage")),
+                manifests_root=Path(_require(silver_storage_raw, "manifests_root", "silver.storage")),
+            ),
+            execution=SilverExecutionConfig(
+                require_bronze_ready_registry=bool(_require(silver_execution_raw, "require_bronze_ready_registry", "silver.execution")),
+                continue_on_file_error=bool(_require(silver_execution_raw, "continue_on_file_error", "silver.execution")),
+                parquet_compression=str(_require(silver_execution_raw, "parquet_compression", "silver.execution")),
+                build_master=bool(_require(silver_execution_raw, "build_master", "silver.execution")),
+                require_reference_data=bool(_require(silver_execution_raw, "require_reference_data", "silver.execution")),
+                refresh_references_if_missing=bool(_require(silver_execution_raw, "refresh_references_if_missing", "silver.execution")),
+                refresh_references_before_run=bool(_require(silver_execution_raw, "refresh_references_before_run", "silver.execution")),
+                claim_ttl_minutes=int(_require(silver_execution_raw, "claim_ttl_minutes", "silver.execution")),
+            ),
+            quality=SilverQualityConfig(
+                valid_location_id_min=int(_require(silver_quality_raw, "valid_location_id_min", "silver.quality")),
+                valid_location_id_max=int(_require(silver_quality_raw, "valid_location_id_max", "silver.quality")),
+                taxi_max_duration_hours=float(_require(silver_quality_raw, "taxi_max_duration_hours", "silver.quality")),
+                fhv_max_duration_hours=float(_require(silver_quality_raw, "fhv_max_duration_hours", "silver.quality")),
+                max_passenger_count=int(_require(silver_quality_raw, "max_passenger_count", "silver.quality")),
+                max_trip_distance_miles=float(_require(silver_quality_raw, "max_trip_distance_miles", "silver.quality")),
+                max_total_amount=float(_require(silver_quality_raw, "max_total_amount", "silver.quality")),
+                impute_zero_or_null_passenger_count=bool(_require(silver_quality_raw, "impute_zero_or_null_passenger_count", "silver.quality")),
+                reject_zero_distance=bool(_require(silver_quality_raw, "reject_zero_distance", "silver.quality")),
+                reject_negative_component_amounts=bool(_require(silver_quality_raw, "reject_negative_component_amounts", "silver.quality")),
+                allowed_store_and_forward_flags=tuple(str(v).upper() for v in _require(silver_quality_raw, "allowed_store_and_forward_flags", "silver.quality")),
+                allowed_boolean_flags=tuple(str(v).upper() for v in _require(silver_quality_raw, "allowed_boolean_flags", "silver.quality")),
+            ),
+            spark=SilverSparkConfig(
+                app_name=str(_require(silver_spark_raw, "app_name", "silver.spark")),
+                master=str(_require(silver_spark_raw, "master", "silver.spark")),
+                log_level=str(_require(silver_spark_raw, "log_level", "silver.spark")),
+                driver_memory=str(_require(silver_spark_raw, "driver_memory", "silver.spark")),
+                shuffle_partitions=int(_require(silver_spark_raw, "shuffle_partitions", "silver.spark")),
+            ),
+            references=SilverReferenceConfig(
+                bronze_root=Path(_require(silver_references_raw, "bronze_root", "silver.references")),
+                taxi_zones_url=str(_require(silver_references_raw, "taxi_zones_url", "silver.references")),
+                base_lookup_url=str(_require(silver_references_raw, "base_lookup_url", "silver.references")),
+                request_timeout_seconds=int(_require(silver_references_raw, "request_timeout_seconds", "silver.references")),
+            ),
+            collections=SilverMongoCollections(
+                pipeline_executions=str(_require(silver_collections_raw, "pipeline_executions", "silver.mongo_collections")),
+                file_registry=str(_require(silver_collections_raw, "file_registry", "silver.mongo_collections")),
+                quality_results=str(_require(silver_collections_raw, "quality_results", "silver.mongo_collections")),
+                reconciliations=str(_require(silver_collections_raw, "reconciliations", "silver.mongo_collections")),
+            ),
+        ),
         schema_contracts=contracts,
     )
 
@@ -423,3 +562,35 @@ def resolve_selection(
         max_hvfhv_workers=selected_hvfhv_workers,
         continue_on_error=selected_continue,
     )
+
+def resolve_silver_selection(
+    config: AppConfig,
+    mode: str,
+    services: list[str] | None = None,
+    start_year: int | None = None,
+    end_year: int | None = None,
+    months: list[int] | None = None,
+    continue_on_error: bool | None = None,
+) -> RunSelection:
+    base_mode = {
+        "silver-historical": "historical",
+        "silver-incremental": "incremental",
+        "silver-run": "run",
+        "silver-plan": "plan",
+    }.get(mode, mode)
+    selection = resolve_selection(
+        config,
+        mode=base_mode,
+        services=services,
+        start_year=start_year,
+        end_year=end_year,
+        months=months,
+        workers=1,
+        max_hvfhv_workers=1,
+        continue_on_error=(
+            config.silver.execution.continue_on_file_error
+            if continue_on_error is None
+            else continue_on_error
+        ),
+    )
+    return selection

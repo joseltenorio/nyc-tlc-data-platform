@@ -8,5 +8,5 @@ __pycache__
 *.pyc
 *.pyo
 *.log
+.ipynb_checkpoints
 data
-notebooks/.ipynb_checkpoints
