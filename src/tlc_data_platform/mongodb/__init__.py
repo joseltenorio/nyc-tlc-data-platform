@@ -1,0 +1,1 @@
+"""Mongodb components for NYC TLC Data Platform."""
