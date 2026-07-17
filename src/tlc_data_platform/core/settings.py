@@ -231,8 +231,6 @@ def load_config(config_dir: str | Path = "config") -> AppConfig:
     )
     if max_workers < 1 or max_hvfhv_workers < 1:
         raise ConfigurationError("Los workers deben ser mayores que cero")
-    if max_hvfhv_workers > max_workers:
-        raise ConfigurationError("max_hvfhv_workers no puede superar max_workers")
 
     return AppConfig(
         project=ProjectConfig(
@@ -409,7 +407,9 @@ def resolve_selection(
         raise ConfigurationError("--months solo acepta valores entre 1 y 12")
     if selected_workers < 1:
         raise ConfigurationError("--workers debe ser mayor que cero")
-    if selected_hvfhv_workers < 1 or selected_hvfhv_workers > selected_workers:
+    if selected_hvfhv_workers < 1:
+        raise ConfigurationError("--max-hvfhv-workers debe ser mayor que cero")
+    if "fhvhv" in selected_services and selected_hvfhv_workers > selected_workers:
         raise ConfigurationError(
             "--max-hvfhv-workers debe estar entre 1 y --workers"
         )

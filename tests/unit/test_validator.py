@@ -6,7 +6,11 @@ import pytest
 
 from tlc_data_platform.bronze.models import FileCandidate
 from tlc_data_platform.core.exceptions import ParquetValidationError
-from tlc_data_platform.ingestion.parquet_validator import ParquetValidator, match_contract_fields
+from tlc_data_platform.ingestion.parquet_validator import (
+    ParquetValidator,
+    match_contract_fields,
+    normalize_spark_type_name,
+)
 
 
 class FakeType:
@@ -84,6 +88,17 @@ def yellow_candidate():
     )
 
 
+def fhv_candidate():
+    return FileCandidate(
+        service="fhv",
+        year=2019,
+        month=1,
+        url="https://example/fhv_tripdata_2019-01.parquet",
+        file_name="fhv_tripdata_2019-01.parquet",
+        discovery_method="html",
+    )
+
+
 def valid_fields(include_new=False):
     fields = [
         ("tpep_pickup_datetime", "timestamp"),
@@ -106,6 +121,14 @@ def test_alias_matching_is_case_insensitive():
     )
     assert matches == {"pickup": "PULocationID", "dropoff": "dropOff_datetime"}
     assert missing == []
+
+
+def test_normalize_spark_type_name_handles_known_aliases():
+    assert normalize_spark_type_name("int") == "integer"
+    assert normalize_spark_type_name("integer") == "integer"
+    assert normalize_spark_type_name("bigint") == "long"
+    assert normalize_spark_type_name("long") == "long"
+    assert normalize_spark_type_name("decimal(10,2)") == "decimal(10,2)"
 
 
 def test_rejects_invalid_signature(tmp_path, app_config):
@@ -145,6 +168,65 @@ def test_new_column_is_detected_without_rejection(tmp_path, app_config):
     assert result.schema_evolution_detected is True
     assert result.new_columns == ["future_fee"]
     assert result.schema_events == ["SCHEMA_EVOLUTION_DETECTED"]
+
+
+def test_timestamp_ntz_and_integer_aliases_are_accepted(tmp_path, app_config):
+    path = tmp_path / "yellow_tripdata_2026-01.parquet"
+    write_yellow_parquet(path)
+    validator = ParquetValidator(app_config.schema_contracts, app_config.validation)
+    result = validator.validate(
+        path,
+        yellow_candidate(),
+        FakeSpark(
+            [
+                ("tpep_pickup_datetime", "timestamp_ntz"),
+                ("tpep_dropoff_datetime", "timestamp_ntz"),
+                ("PULocationID", "int"),
+                ("DOLocationID", "integer"),
+            ]
+        ),
+    )
+    assert result.type_mismatches == {}
+
+
+def test_bigint_alias_is_accepted_for_integer_contract(tmp_path, app_config):
+    path = tmp_path / "yellow_tripdata_2026-01.parquet"
+    write_yellow_parquet(path)
+    validator = ParquetValidator(app_config.schema_contracts, app_config.validation)
+    result = validator.validate(
+        path,
+        yellow_candidate(),
+        FakeSpark(
+            [
+                ("tpep_pickup_datetime", "timestamp"),
+                ("tpep_dropoff_datetime", "timestamp"),
+                ("PULocationID", "bigint"),
+                ("DOLocationID", "long"),
+            ]
+        ),
+    )
+    assert result.type_mismatches == {}
+
+
+def test_fhv_historical_double_location_ids_are_accepted(tmp_path, app_config):
+    path = tmp_path / "fhv_tripdata_2019-01.parquet"
+    write_yellow_parquet(path)
+    validator = ParquetValidator(app_config.schema_contracts, app_config.validation)
+    result = validator.validate(
+        path,
+        fhv_candidate(),
+        FakeSpark(
+            [
+                ("dispatching_base_num", "string"),
+                ("pickup_datetime", "timestamp_ntz"),
+                ("dropOff_datetime", "timestamp_ntz"),
+                ("PUlocationID", "double"),
+                ("DOlocationID", "double"),
+            ]
+        ),
+    )
+    assert result.required_field_matches["pickup_location_id"] == "PUlocationID"
+    assert result.type_mismatches == {}
 
 
 def test_filename_period_mismatch_fails(tmp_path, app_config):

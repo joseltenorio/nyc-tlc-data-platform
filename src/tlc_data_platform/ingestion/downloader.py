@@ -22,6 +22,10 @@ def has_parquet_signature(path: Path) -> bool:
 
 
 class FileDownloader:
+    DOWNLOAD_RETRYABLE_STATUS_CODES = (
+        HttpClient.RETRYABLE_STATUS_CODES | {403}
+    )
+
     def __init__(
         self,
         http: HttpClient,
@@ -54,7 +58,11 @@ class FileDownloader:
         temporary.unlink(missing_ok=True)
 
         response = self._http.request(
-            "GET", candidate.url, stream=True, allow_redirects=True
+            "GET",
+            candidate.url,
+            stream=True,
+            allow_redirects=True,
+            retryable_status_codes=self.DOWNLOAD_RETRYABLE_STATUS_CODES,
         )
         try:
             response.raise_for_status()

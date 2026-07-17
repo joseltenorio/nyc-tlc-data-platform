@@ -44,3 +44,17 @@ def test_timeout_is_retried(app_config, monkeypatch):
     response = client.request("GET", "https://example.test/file")
     assert response.status_code == 200
     assert session.calls == 2
+
+
+def test_custom_retryable_status_codes_allow_retrying_403(app_config, monkeypatch):
+    client = HttpClient(app_config.discovery, app_config.download)
+    session = FakeSession([FakeResponse(403), FakeResponse(200)])
+    client._local.session = session
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    response = client.request(
+        "GET",
+        "https://example.test/file",
+        retryable_status_codes={403},
+    )
+    assert response.status_code == 200
+    assert session.calls == 2

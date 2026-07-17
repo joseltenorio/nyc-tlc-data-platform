@@ -348,6 +348,26 @@ def test_partial_success_when_one_download_fails(app_config):
     assert summary.failed_files == 1
 
 
+def test_download_phase_collects_all_futures_after_individual_failure(app_config):
+    storage = BronzeStorage(app_config.storage)
+    downloader = FakeDownloader(storage, fail_months=[2])
+    pipeline, _, _, _ = make_pipeline(
+        app_config,
+        [candidate(1), candidate(2), candidate(3)],
+        downloader=downloader,
+    )
+    selection = resolve_selection(
+        app_config,
+        mode="incremental",
+        services=["yellow"],
+        months=[1, 2, 3],
+    )
+    summary = pipeline.run(selection, execution_type="incremental")
+    assert downloader.calls == 3
+    assert summary.ready_files == 2
+    assert summary.failed_files == 1
+
+
 def test_plan_does_not_download(app_config):
     pipeline, audit, downloader, _ = make_pipeline(app_config, [candidate()])
     selection = resolve_selection(app_config, mode="plan", services=["yellow"], start_year=2026, end_year=2026, months=[1])

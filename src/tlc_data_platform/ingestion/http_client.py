@@ -51,6 +51,9 @@ class HttpClient:
         max_attempts = self._download.max_retries + 1
         backoff = self._download.initial_backoff_seconds
         last_error: Exception | None = None
+        retryable_status_codes = set(
+            kwargs.pop("retryable_status_codes", self.RETRYABLE_STATUS_CODES)
+        )
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -61,7 +64,7 @@ class HttpClient:
                     verify=kwargs.pop("verify", self._discovery.verify_tls),
                     **kwargs,
                 )
-                if response.status_code not in self.RETRYABLE_STATUS_CODES:
+                if response.status_code not in retryable_status_codes:
                     return response
                 if attempt == max_attempts:
                     return response

@@ -17,9 +17,23 @@ FILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+TYPE_ALIASES = {
+    "int": "integer",
+    "integer": "integer",
+    "bigint": "long",
+    "long": "long",
+}
+
 
 def _normalized_lookup(columns: list[str]) -> dict[str, str]:
     return {column.casefold(): column for column in columns}
+
+
+def normalize_spark_type_name(type_name: str) -> str:
+    normalized = type_name.strip().lower()
+    base, _, suffix = normalized.partition("(")
+    canonical = TYPE_ALIASES.get(base, base)
+    return canonical if not suffix else f"{canonical}({suffix}"
 
 
 def match_contract_fields(
@@ -102,7 +116,8 @@ class ParquetValidator:
 
         observed_columns = list(schema.fieldNames())
         observed_types = {
-            field.name: field.dataType.simpleString().lower() for field in schema.fields
+            field.name: normalize_spark_type_name(field.dataType.simpleString())
+            for field in schema.fields
         }
         schema_json = schema.json()
         schema_hash = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
@@ -138,7 +153,7 @@ class ParquetValidator:
         type_mismatches: dict[str, dict[str, Any]] = {}
         for logical_name, physical_name in required_matches.items():
             accepted = [
-                str(value).lower()
+                normalize_spark_type_name(str(value))
                 for value in required_definitions[logical_name].get("accepted_types", [])
             ]
             observed = observed_types[physical_name]

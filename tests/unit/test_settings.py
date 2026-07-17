@@ -27,6 +27,18 @@ def test_worker_limits_are_validated(app_config):
         resolve_selection(app_config, mode="run", workers=2, max_hvfhv_workers=3)
 
 
+def test_hvfhv_worker_limit_is_ignored_when_service_not_selected(app_config):
+    selection = resolve_selection(
+        app_config,
+        mode="run",
+        services=["yellow"],
+        workers=1,
+        max_hvfhv_workers=2,
+    )
+    assert selection.workers == 1
+    assert selection.max_hvfhv_workers == 2
+
+
 def test_disabled_service_is_rejected(app_config):
     services = dict(app_config.services)
     services["green"] = replace(services["green"], enabled=False)
