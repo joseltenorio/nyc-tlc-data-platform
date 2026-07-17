@@ -1,0 +1,47 @@
+name: nyc-tlc-data-platform
+
+services:
+  mongodb:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-tlc_admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-tlc_admin_local}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet
+          --username "$${MONGO_INITDB_ROOT_USERNAME}"
+          --password "$${MONGO_INITDB_ROOT_PASSWORD}"
+          --authenticationDatabase admin
+          --eval "db.adminCommand({ ping: 1 }).ok" | grep 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  bronze:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGODB_URI: ${MONGODB_URI:-mongodb://tlc_admin:tlc_admin_local@mongodb:27017/?authSource=admin}
+      TLC_ENVIRONMENT: ${TLC_ENVIRONMENT:-local}
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+
+volumes:
+  mongo_data:

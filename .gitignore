@@ -1,0 +1,23 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.ipynb_checkpoints/
+
+# Runtime data
+data/bronze/trip_records/**/*.parquet
+data/bronze/versions/trip_records/**/*.parquet
+data/tmp/*
+data/manifests/*.json
+!data/.gitkeep
+!data/bronze/.gitkeep
+!data/bronze/trip_records/.gitkeep
+!data/bronze/versions/.gitkeep
+!data/bronze/versions/trip_records/.gitkeep
+!data/manifests/.gitkeep
+!data/tmp/.gitkeep
