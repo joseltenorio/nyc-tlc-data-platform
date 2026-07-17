@@ -1,0 +1,654 @@
+from __future__ import annotations
+
+import logging
+import threading
+import uuid
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
+
+from tlc_data_platform.audit.availability_repository import AvailabilityRepository
+from tlc_data_platform.audit.execution_repository import ExecutionRepository
+from tlc_data_platform.audit.file_registry_repository import FileRegistryRepository
+from tlc_data_platform.audit.file_version_repository import FileVersionRepository
+from tlc_data_platform.audit.summaries import AuditRepositories
+from tlc_data_platform.bronze.manifest import ManifestWriter
+from tlc_data_platform.bronze.models import (
+    AvailabilityRecord,
+    DownloadResult,
+    ExecutionSummary,
+    FileCandidate,
+    FileOutcome,
+    PlanSummary,
+    RemoteMetadata,
+    utc_now,
+)
+from tlc_data_platform.bronze.storage import BronzeStorage
+from tlc_data_platform.core.settings import AppConfig, RunSelection
+from tlc_data_platform.core.spark import SparkProvider
+from tlc_data_platform.ingestion.discovery import FileDiscovery
+from tlc_data_platform.ingestion.downloader import FileDownloader
+from tlc_data_platform.ingestion.http_client import HttpClient
+from tlc_data_platform.ingestion.parquet_validator import ParquetValidator
+from tlc_data_platform.ingestion.remote_probe import RemoteProbe
+from tlc_data_platform.mongodb.client import MongoClientProvider
+from tlc_data_platform.mongodb.index_manager import MongoIndexManager
+
+LOGGER = logging.getLogger(__name__)
+
+
+class BronzePipeline:
+    """Coordinates discovery, concurrent download, validation, publication and audit."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        http: HttpClient | None = None,
+        probe: RemoteProbe | None = None,
+        discovery: FileDiscovery | None = None,
+        storage: BronzeStorage | None = None,
+        downloader: FileDownloader | None = None,
+        validator: ParquetValidator | None = None,
+        spark: SparkProvider | None = None,
+        mongo_provider: MongoClientProvider | None = None,
+        audit: AuditRepositories | None = None,
+    ) -> None:
+        self._config = config
+        self._http = http or HttpClient(config.discovery, config.download)
+        self._probe = probe or RemoteProbe(self._http)
+        self._storage = storage or BronzeStorage(config.storage)
+        self._discovery = discovery or FileDiscovery(config, self._http, self._probe)
+        self._downloader = downloader or FileDownloader(
+            self._http, self._storage, config.download
+        )
+        self._validator = validator or ParquetValidator(
+            config.schema_contracts, config.validation
+        )
+        self._spark = spark or SparkProvider(config.spark)
+        self._mongo_provider = mongo_provider or MongoClientProvider(config.mongo)
+        self._audit = audit
+
+    def close(self) -> None:
+        self._spark.close()
+        self._http.close()
+        self._mongo_provider.close()
+
+    def _ensure_audit(self) -> AuditRepositories:
+        if self._audit is None:
+            database = self._mongo_provider.database()
+            MongoIndexManager(database, self._config.mongo).ensure_indexes()
+            names = self._config.mongo.collections
+            self._audit = AuditRepositories(
+                executions=ExecutionRepository(database[names.pipeline_executions]),
+                availability=AvailabilityRepository(database[names.file_availability]),
+                registry=FileRegistryRepository(
+                    database[names.file_registry],
+                    self._config.download.claim_ttl_minutes,
+                ),
+                versions=FileVersionRepository(database[names.file_versions]),
+            )
+        return self._audit
+
+    def plan(self, selection: RunSelection) -> PlanSummary:
+        self._storage.ensure_directories()
+        plan_id = f"plan-{utc_now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        discovery = self._discovery.discover(
+            plan_id,
+            selection.services,
+            selection.start_year,
+            selection.end_year,
+            selection.months,
+        )
+        remote_map = self._probe_candidates(discovery.candidates, selection.workers)
+        availability = self._merge_probe_results(discovery.availability, remote_map)
+
+        warnings: list[str] = []
+        if discovery.html_error:
+            warnings.append(
+                "El HTML oficial no pudo consultarse; se usó el fallback determinista."
+            )
+
+        registry: FileRegistryRepository | None = None
+        try:
+            registry = self._ensure_audit().registry
+        except Exception as exc:
+            warnings.append(
+                f"MongoDB no estuvo disponible para consultar archivos procesados: {exc}"
+            )
+
+        already_processed = 0
+        estimated_bytes = 0
+        unknown_size = 0
+        candidate_details: list[dict[str, Any]] = []
+        for candidate in discovery.candidates:
+            remote = remote_map.get(candidate.period_id, RemoteMetadata(False))
+            existing = registry.get(candidate) if registry is not None else None
+            processed = self._is_unchanged(
+                existing,
+                self._storage.final_path(candidate),
+                remote,
+            )
+            if processed:
+                already_processed += 1
+            if remote.available:
+                if remote.content_length is None:
+                    unknown_size += 1
+                else:
+                    estimated_bytes += remote.content_length
+            candidate_details.append(
+                {
+                    **candidate.to_dict(),
+                    "remote": remote.to_dict(),
+                    "already_processed": processed,
+                }
+            )
+
+        free_space = self._storage.free_space_bytes()
+        if unknown_size:
+            warnings.append(
+                f"{unknown_size} archivo(s) no informaron Content-Length; la estimación es parcial."
+            )
+        if estimated_bytes + self._storage.minimum_free_space_bytes > free_space:
+            warnings.append(
+                "El tamaño remoto estimado más la reserva mínima supera el espacio libre."
+            )
+        failed_probes = sum(item.status == "FAILED_TO_PROBE" for item in availability)
+        if failed_probes:
+            warnings.append(f"{failed_probes} periodo(s) no pudieron verificarse por red.")
+
+        available_files = sum(item.status == "AVAILABLE" for item in availability)
+        pending = max(0, available_files - already_processed)
+        return PlanSummary(
+            plan_type="PLAN",
+            services=selection.services,
+            start_year=selection.start_year,
+            end_year=selection.end_year,
+            months=selection.months,
+            expected_periods=len(discovery.expected_periods),
+            applicable_periods=sum(p.applicable for p in discovery.expected_periods),
+            not_applicable_periods=sum(not p.applicable for p in discovery.expected_periods),
+            available_files=available_files,
+            not_published_files=sum(
+                item.status == "NOT_PUBLISHED_YET" for item in availability
+            ),
+            failed_probes=failed_probes,
+            already_processed_files=already_processed,
+            pending_files=pending,
+            estimated_remote_bytes=estimated_bytes,
+            unknown_size_files=unknown_size,
+            free_space_bytes=free_space,
+            minimum_free_space_bytes=self._storage.minimum_free_space_bytes,
+            workers=selection.workers,
+            max_hvfhv_workers=selection.max_hvfhv_workers,
+            warnings=warnings,
+            candidates=candidate_details,
+        )
+
+    def run(
+        self,
+        selection: RunSelection,
+        *,
+        execution_type: str,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> ExecutionSummary:
+        started_at = utc_now()
+        execution_id = (
+            f"run-{started_at.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        )
+        self._storage.ensure_directories()
+        audit = self._ensure_audit()
+        manifest = ManifestWriter(self._config.storage.manifests_root, execution_id)
+        audit.executions.start(
+            execution_id,
+            "DRY_RUN" if dry_run else execution_type.upper(),
+            started_at,
+            {
+                "services": selection.services,
+                "start_year": selection.start_year,
+                "end_year": selection.end_year,
+                "months": selection.months,
+                "workers": selection.workers,
+                "max_hvfhv_workers": selection.max_hvfhv_workers,
+                "force": force,
+                "dry_run": dry_run,
+            },
+        )
+
+        outcomes: list[FileOutcome] = []
+        availability: list[AvailabilityRecord] = []
+        discovery = None
+        try:
+            discovery = self._discovery.discover(
+                execution_id,
+                selection.services,
+                selection.start_year,
+                selection.end_year,
+                selection.months,
+            )
+            remote_map = self._probe_candidates(
+                discovery.candidates, selection.workers
+            )
+            availability = self._merge_probe_results(
+                discovery.availability, remote_map
+            )
+            audit.availability.insert_many(availability)
+            manifest.set_availability(availability)
+
+            available_candidates = [
+                candidate
+                for candidate in discovery.candidates
+                if remote_map.get(candidate.period_id, RemoteMetadata(False)).available
+            ]
+
+            if dry_run:
+                for candidate in available_candidates:
+                    outcome = FileOutcome(candidate=candidate, status="DRY_RUN")
+                    outcome.remote_metadata = remote_map[candidate.period_id]
+                    outcome.finish()
+                    outcomes.append(outcome)
+                    manifest.add_outcome(outcome)
+                return self._finish_execution(
+                    audit,
+                    manifest,
+                    execution_id,
+                    "DRY_RUN",
+                    started_at,
+                    selection,
+                    discovery,
+                    availability,
+                    outcomes,
+                )
+
+            pending: list[tuple[FileCandidate, RemoteMetadata, dict[str, Any] | None]] = []
+            for candidate in available_candidates:
+                remote = remote_map[candidate.period_id]
+                existing = audit.registry.get(candidate)
+                destination = self._storage.final_path(candidate)
+                if not force and self._is_unchanged(existing, destination, remote):
+                    outcome = FileOutcome(
+                        candidate=candidate,
+                        status="SKIPPED_UNCHANGED",
+                        remote_metadata=remote,
+                        local_path=str(destination),
+                    )
+                    current = (existing or {}).get("current") or {}
+                    outcome.sha256 = current.get("sha256")
+                    outcome.finish()
+                    outcomes.append(outcome)
+                    manifest.add_outcome(outcome)
+                    continue
+
+                if not audit.registry.claim(candidate, execution_id):
+                    outcome = FileOutcome(
+                        candidate=candidate,
+                        status="SKIPPED_CLAIMED",
+                        remote_metadata=remote,
+                    )
+                    outcome.finish()
+                    outcomes.append(outcome)
+                    manifest.add_outcome(outcome)
+                    continue
+                pending.append((candidate, remote, existing))
+
+            downloaded, failed_downloads = self._download_pending(
+                pending,
+                execution_id,
+                selection,
+                audit,
+            )
+            for outcome in failed_downloads:
+                outcomes.append(outcome)
+                manifest.add_outcome(outcome)
+
+            if downloaded:
+                spark = self._spark.get()
+                for result, existing in downloaded:
+                    outcome = self._validate_and_publish(
+                        result,
+                        existing,
+                        execution_id,
+                        spark,
+                        audit,
+                    )
+                    outcomes.append(outcome)
+                    manifest.add_outcome(outcome)
+                    if (
+                        outcome.status == "FAILED"
+                        and not selection.continue_on_error
+                    ):
+                        break
+
+            return self._finish_execution(
+                audit,
+                manifest,
+                execution_id,
+                execution_type.upper(),
+                started_at,
+                selection,
+                discovery,
+                availability,
+                outcomes,
+            )
+        except Exception as exc:
+            finished_at = utc_now()
+            manifest_path: str | None = None
+            if discovery is not None:
+                failed_summary = self._build_summary(
+                    execution_id,
+                    execution_type.upper(),
+                    "FAILED",
+                    started_at,
+                    finished_at,
+                    selection,
+                    discovery,
+                    availability,
+                    outcomes,
+                    str(manifest.path),
+                )
+                try:
+                    manifest_path = str(manifest.write(failed_summary))
+                except OSError:
+                    LOGGER.exception("No se pudo escribir el manifiesto de error")
+            audit.executions.fail(
+                execution_id, finished_at, exc, manifest_path
+            )
+            raise
+
+    def _probe_candidates(
+        self,
+        candidates: list[FileCandidate],
+        workers: int,
+    ) -> dict[str, RemoteMetadata]:
+        if not candidates:
+            return {}
+        result: dict[str, RemoteMetadata] = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self._probe.probe, candidate.url): candidate
+                for candidate in candidates
+            }
+            for future in as_completed(futures):
+                candidate = futures[future]
+                try:
+                    result[candidate.period_id] = future.result()
+                except Exception as exc:
+                    result[candidate.period_id] = RemoteMetadata(
+                        available=False,
+                        probe_failed=True,
+                        error_message=str(exc),
+                    )
+        return result
+
+    @staticmethod
+    def _merge_probe_results(
+        availability: list[AvailabilityRecord],
+        remote_map: dict[str, RemoteMetadata],
+    ) -> list[AvailabilityRecord]:
+        merged: list[AvailabilityRecord] = []
+        for item in availability:
+            remote = remote_map.get(item.period_id)
+            if remote is None or item.status == "NOT_APPLICABLE":
+                merged.append(item)
+                continue
+            if remote.available:
+                status = "AVAILABLE"
+            elif remote.probe_failed:
+                status = "FAILED_TO_PROBE"
+            else:
+                status = "NOT_PUBLISHED_YET"
+            item.status = status
+            item.remote_metadata = remote
+            merged.append(item)
+        return merged
+
+    def _download_pending(
+        self,
+        pending: list[tuple[FileCandidate, RemoteMetadata, dict[str, Any] | None]],
+        execution_id: str,
+        selection: RunSelection,
+        audit: AuditRepositories,
+    ) -> tuple[
+        list[tuple[DownloadResult, dict[str, Any] | None]],
+        list[FileOutcome],
+    ]:
+        downloaded: list[tuple[DownloadResult, dict[str, Any] | None]] = []
+        failures: list[FileOutcome] = []
+        hvfhv_semaphore = threading.Semaphore(selection.max_hvfhv_workers)
+
+        def task(
+            candidate: FileCandidate,
+            remote: RemoteMetadata,
+            existing: dict[str, Any] | None,
+        ) -> tuple[DownloadResult, dict[str, Any] | None]:
+            semaphore = hvfhv_semaphore if candidate.service == "fhvhv" else None
+            if semaphore is not None:
+                semaphore.acquire()
+            try:
+                audit.registry.set_status(
+                    candidate,
+                    execution_id,
+                    "DOWNLOADING",
+                    remote_metadata=remote.to_dict(),
+                )
+                result = self._downloader.download(candidate, execution_id, remote)
+                audit.registry.set_status(
+                    candidate,
+                    execution_id,
+                    "DOWNLOADED",
+                    bytes_downloaded=result.bytes_downloaded,
+                    sha256=result.sha256,
+                )
+                return result, existing
+            finally:
+                if semaphore is not None:
+                    semaphore.release()
+
+        max_workers = selection.workers if self._config.download.parallel_enabled else 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map: dict[
+                Future[tuple[DownloadResult, dict[str, Any] | None]],
+                FileCandidate,
+            ] = {}
+            for candidate, remote, existing in pending:
+                future_map[executor.submit(task, candidate, remote, existing)] = candidate
+
+            for future in as_completed(future_map):
+                candidate = future_map[future]
+                try:
+                    downloaded.append(future.result())
+                except Exception as exc:
+                    outcome = FileOutcome(candidate=candidate, status="FAILED")
+                    outcome.error_type = type(exc).__name__
+                    outcome.error_message = str(exc)
+                    outcome.finish()
+                    self._storage.discard_temporary(candidate, execution_id)
+                    audit.registry.mark_failed(outcome, execution_id)
+                    failures.append(outcome)
+        return downloaded, failures
+
+    def _validate_and_publish(
+        self,
+        result: DownloadResult,
+        existing: dict[str, Any] | None,
+        execution_id: str,
+        spark: Any,
+        audit: AuditRepositories,
+    ) -> FileOutcome:
+        candidate = result.candidate
+        outcome = FileOutcome(
+            candidate=candidate,
+            status="VALIDATING",
+            remote_metadata=result.remote_metadata,
+            bytes_downloaded=result.bytes_downloaded,
+            sha256=result.sha256,
+        )
+        current = (existing or {}).get("current") or {}
+        previous_sha = current.get("sha256")
+        destination = self._storage.final_path(candidate)
+
+        try:
+            audit.registry.set_status(candidate, execution_id, "VALIDATING")
+            if previous_sha == result.sha256 and destination.is_file():
+                result.path.unlink(missing_ok=True)
+                outcome.status = "SKIPPED_UNCHANGED"
+                outcome.local_path = str(destination)
+                outcome.finish()
+                audit.registry.release_claim(candidate, execution_id)
+                return outcome
+
+            validation = self._validator.validate(result.path, candidate, spark)
+            final_path, archived_path = self._storage.promote(
+                result.path,
+                candidate,
+                previous_sha256=previous_sha,
+                new_sha256=result.sha256,
+            )
+            outcome.validation = validation
+            outcome.local_path = str(final_path)
+            outcome.archived_previous_path = (
+                str(archived_path) if archived_path is not None else None
+            )
+            outcome.status = "READY"
+            outcome.finish()
+
+            if archived_path is not None:
+                audit.versions.mark_archived(
+                    candidate.service,
+                    candidate.year,
+                    candidate.month,
+                    previous_sha,
+                    str(archived_path),
+                    execution_id,
+                )
+            audit.versions.insert_current(outcome, execution_id)
+            audit.registry.mark_ready(outcome, execution_id)
+            return outcome
+        except Exception as exc:
+            result.path.unlink(missing_ok=True)
+            outcome.status = "FAILED"
+            outcome.error_type = type(exc).__name__
+            outcome.error_message = str(exc)
+            outcome.finish()
+            audit.registry.mark_failed(outcome, execution_id)
+            return outcome
+
+    def _finish_execution(
+        self,
+        audit: AuditRepositories,
+        manifest: ManifestWriter,
+        execution_id: str,
+        execution_type: str,
+        started_at: Any,
+        selection: RunSelection,
+        discovery: Any,
+        availability: list[AvailabilityRecord],
+        outcomes: list[FileOutcome],
+    ) -> ExecutionSummary:
+        finished_at = utc_now()
+        failed = sum(outcome.status == "FAILED" for outcome in outcomes)
+        failed_probes = sum(item.status == "FAILED_TO_PROBE" for item in availability)
+        successes = sum(
+            outcome.status in {"READY", "SKIPPED_UNCHANGED", "DRY_RUN"}
+            for outcome in outcomes
+        )
+        status = "SUCCESS"
+        if failed and successes:
+            status = "PARTIAL_SUCCESS"
+        elif failed:
+            status = "FAILED"
+        elif failed_probes:
+            status = "PARTIAL_SUCCESS"
+        summary = self._build_summary(
+            execution_id,
+            execution_type,
+            status,
+            started_at,
+            finished_at,
+            selection,
+            discovery,
+            availability,
+            outcomes,
+            str(manifest.path),
+        )
+        manifest.write(summary)
+        audit.executions.finish(summary)
+        return summary
+
+    @staticmethod
+    def _build_summary(
+        execution_id: str,
+        execution_type: str,
+        status: str,
+        started_at: Any,
+        finished_at: Any,
+        selection: RunSelection,
+        discovery: Any,
+        availability: list[AvailabilityRecord],
+        outcomes: list[FileOutcome],
+        manifest_path: str,
+    ) -> ExecutionSummary:
+        return ExecutionSummary(
+            execution_id=execution_id,
+            execution_type=execution_type,
+            status=status,
+            started_at=started_at,
+            finished_at=finished_at,
+            requested_services=selection.services,
+            requested_start_year=selection.start_year,
+            requested_end_year=selection.end_year,
+            requested_months=selection.months,
+            expected_periods=len(discovery.expected_periods),
+            applicable_periods=sum(p.applicable for p in discovery.expected_periods),
+            available_files=sum(item.status == "AVAILABLE" for item in availability),
+            downloaded_files=sum(
+                outcome.bytes_downloaded is not None
+                and outcome.status in {"READY", "FAILED", "SKIPPED_UNCHANGED"}
+                for outcome in outcomes
+            ),
+            ready_files=sum(outcome.status == "READY" for outcome in outcomes),
+            skipped_files=sum(
+                outcome.status in {"SKIPPED_UNCHANGED", "SKIPPED_CLAIMED"}
+                for outcome in outcomes
+            ),
+            failed_files=sum(outcome.status == "FAILED" for outcome in outcomes),
+            failed_probe_periods=sum(
+                item.status == "FAILED_TO_PROBE" for item in availability
+            ),
+            not_published_files=sum(
+                item.status == "NOT_PUBLISHED_YET" for item in availability
+            ),
+            not_applicable_periods=sum(
+                item.status == "NOT_APPLICABLE" for item in availability
+            ),
+            total_bytes_downloaded=sum(
+                outcome.bytes_downloaded or 0 for outcome in outcomes
+            ),
+            manifest_path=manifest_path,
+        )
+
+    @staticmethod
+    def _is_unchanged(
+        existing: dict[str, Any] | None,
+        destination: Path,
+        remote: RemoteMetadata,
+    ) -> bool:
+        if not existing or not destination.is_file():
+            return False
+        current = existing.get("current") or {}
+        if current.get("status") != "READY":
+            return False
+        previous_remote = current.get("remote_metadata") or {}
+        compared = 0
+        for field in ("etag", "last_modified", "content_length"):
+            old = previous_remote.get(field)
+            new = getattr(remote, field)
+            if old is not None and new is not None:
+                compared += 1
+                if old != new:
+                    return False
+        if compared:
+            return True
+        expected_size = current.get("bytes_downloaded")
+        return expected_size is None or destination.stat().st_size == expected_size
