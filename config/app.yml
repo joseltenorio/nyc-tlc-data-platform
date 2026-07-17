@@ -1,0 +1,10 @@
+project:
+  name: nyc-tlc-data-platform
+  version: 1.1.0
+  layer: bronze
+  environment_variable: TLC_ENVIRONMENT
+  default_environment: local
+
+logging:
+  level: INFO
+  format: "%(asctime)s %(levelname)s %(name)s - %(message)s"

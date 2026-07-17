@@ -1,0 +1,43 @@
+storage:
+  bronze_root: data/bronze/trip_records
+  versions_root: data/bronze/versions/trip_records
+  temporary_root: data/tmp
+  manifests_root: data/manifests
+  minimum_free_space_bytes: 1073741824
+
+download:
+  parallel_enabled: true
+  max_workers: 8
+  max_hvfhv_workers: 2
+  chunk_size_bytes: 8388608
+  minimum_file_size_bytes: 1024
+  max_retries: 3
+  initial_backoff_seconds: 5
+  max_backoff_seconds: 30
+  connect_timeout_seconds: 15
+  read_timeout_seconds: 120
+  calculate_sha256: true
+  validate_parquet_signature: true
+  continue_on_file_error: true
+  claim_ttl_minutes: 180
+
+validation:
+  allow_new_columns: true
+  read_sample_row: true
+
+spark:
+  app_name: nyc-tlc-data-platform-bronze-validator
+  master: local[*]
+  log_level: WARN
+  driver_memory: 4g
+
+mongo:
+  uri_environment_variable: MONGODB_URI
+  default_uri: mongodb://localhost:27017
+  database: nyc_tlc_audit
+  connect_timeout_ms: 10000
+  collections:
+    pipeline_executions: pipeline_executions
+    file_availability: file_availability
+    file_registry: file_registry
+    file_versions: file_versions

@@ -1,0 +1,18 @@
+class TLCPlatformError(Exception):
+    """Base exception for the project."""
+
+
+class ConfigurationError(TLCPlatformError, ValueError):
+    """Raised when YAML configuration is invalid."""
+
+
+class DownloadError(TLCPlatformError):
+    """Raised when a remote file cannot be downloaded safely."""
+
+
+class ParquetValidationError(TLCPlatformError):
+    """Raised when a downloaded file is not an acceptable Bronze Parquet."""
+
+
+class InsufficientDiskSpaceError(TLCPlatformError):
+    """Raised when the local filesystem cannot safely receive the download."""

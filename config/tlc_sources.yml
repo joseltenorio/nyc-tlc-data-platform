@@ -1,0 +1,45 @@
+source:
+  name: NYC TLC Trip Record Data
+  publisher: NYC Taxi and Limousine Commission
+  landing_page: https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
+  parquet_base_url: https://d37ci6vzurychx.cloudfront.net/trip-data
+  allowed_hosts:
+    - www.nyc.gov
+    - d37ci6vzurychx.cloudfront.net
+
+period:
+  historical_start_year: 2019
+  historical_end_year: 2025
+  incremental_year: 2026
+  months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+services:
+  yellow:
+    enabled: true
+    file_prefix: yellow_tripdata
+    available_from:
+      year: 2019
+      month: 1
+  green:
+    enabled: true
+    file_prefix: green_tripdata
+    available_from:
+      year: 2019
+      month: 1
+  fhv:
+    enabled: true
+    file_prefix: fhv_tripdata
+    available_from:
+      year: 2019
+      month: 1
+  fhvhv:
+    enabled: true
+    file_prefix: fhvhv_tripdata
+    available_from:
+      year: 2019
+      month: 2
+
+discovery:
+  strategy: html_with_deterministic_fallback
+  verify_tls: true
+  user_agent: nyc-tlc-data-platform/1.1
