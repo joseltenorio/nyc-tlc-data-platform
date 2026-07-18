@@ -1,0 +1,51 @@
+app:
+  title: NYC TLC Mobility Intelligence
+  subtitle: Analítica descriptiva, diagnóstica, predictiva y control operativo
+  page_icon: "🚕"
+  layout: wide
+
+paths:
+  gold_root: data/gold
+  ml_root: data/ml
+  manifests_root: data/manifests
+
+analysis_scope:
+  start_year: 2023
+  end_year: 2025
+  complete_services: [yellow, green, fhv]
+  partial_services:
+    fhvhv:
+      available_years: [2023]
+      note: "HVFHV tiene cobertura parcial. La ausencia en 2024-2025 se muestra como no disponible, nunca como cero."
+
+refresh:
+  parquet_cache_seconds: 300
+  audit_cache_seconds: 60
+
+mongo:
+  uri_environment_variable: MONGODB_URI
+  default_uri: mongodb://localhost:27017
+  database: nyc_tlc_audit
+  connect_timeout_ms: 1500
+
+status_labels:
+  SUCCESS: Exitoso
+  SUCCEEDED: Exitoso
+  PARTIAL_SUCCESS: Éxito parcial
+  FAILED: Fallido
+  RUNNING: En ejecución
+  NO_INPUT: Sin entrada
+  BLOCKED: Bloqueado
+  READY: Listo
+  SKIPPED: Omitido
+
+status_colors:
+  SUCCESS: "#6FCB83"
+  SUCCEEDED: "#6FCB83"
+  PARTIAL_SUCCESS: "#F2B35D"
+  FAILED: "#F07867"
+  RUNNING: "#6E9FD0"
+  NO_INPUT: "#A7A7B3"
+  BLOCKED: "#A7A7B3"
+  READY: "#6FCB83"
+  SKIPPED: "#A7A7B3"

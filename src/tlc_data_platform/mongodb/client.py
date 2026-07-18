@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import timezone
 from typing import Any
 
 from tlc_data_platform.core.settings import MongoConfig
@@ -20,12 +21,17 @@ class MongoClientProvider:
                 self._config.uri_environment_variable,
                 self._config.default_uri,
             )
+
             self._client = MongoClient(
                 uri,
                 serverSelectionTimeoutMS=self._config.connect_timeout_ms,
+                tz_aware=True,
+                tzinfo=timezone.utc,
             )
+
             self._client.admin.command("ping")
             self._database = self._client[self._config.database]
+
         return self._database
 
     def close(self) -> None:

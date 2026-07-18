@@ -111,6 +111,8 @@ class DownloadResult:
     bytes_downloaded: int
     sha256: str
     remote_metadata: RemoteMetadata
+    attempt_count: int = 1
+    retry_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,8 @@ class FileOutcome:
     validation: ValidationResult | None = None
     error_type: str | None = None
     error_message: str | None = None
+    attempt_count: int = 0
+    retry_count: int = 0
 
     def finish(self) -> None:
         self.finished_at = utc_now()
@@ -219,6 +223,8 @@ class ExecutionSummary:
     not_applicable_periods: int
     total_bytes_downloaded: int
     manifest_path: str
+    total_download_attempts: int = 0
+    total_retries: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

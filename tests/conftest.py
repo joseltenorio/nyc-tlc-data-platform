@@ -40,7 +40,29 @@ def app_config(tmp_path: Path):
         storage=silver_storage,
         references=silver_references,
     )
-    return replace(config, storage=storage, download=download, silver=silver)
+    gold_storage = replace(
+        config.gold.storage,
+        gold_root=tmp_path / "gold",
+        temporary_root=tmp_path / "tmp" / "gold",
+        manifests_root=tmp_path / "manifests" / "gold",
+    )
+    gold = replace(config.gold, storage=gold_storage)
+    ml_storage = replace(
+        config.ml.storage,
+        ml_root=tmp_path / "ml",
+        model_root=tmp_path / "models",
+        temporary_root=tmp_path / "tmp" / "ml",
+        manifests_root=tmp_path / "manifests" / "ml",
+    )
+    ml = replace(config.ml, storage=ml_storage)
+    return replace(
+        config,
+        storage=storage,
+        download=download,
+        silver=silver,
+        gold=gold,
+        ml=ml,
+    )
 
 @pytest.fixture(scope="session")
 def spark():

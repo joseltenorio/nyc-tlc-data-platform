@@ -224,13 +224,14 @@ def transform(raw: Any, context: SilverTransformContext, quality: SilverQualityC
             Rule(
                 "SHARED_MATCH_WITHOUT_REQUEST",
                 "WARNING",
-                (F.col("shared_matched") == True)
-                & (F.col("shared_requested") != True),
+                F.col("shared_matched").eqNullSafe(F.lit(True))
+                & F.col("shared_requested").eqNullSafe(F.lit(False)),
             ),
             Rule(
                 "WAV_MATCH_WITHOUT_REQUEST",
                 "WARNING",
-                (F.col("wav_matched") == True) & (F.col("wav_requested") != True),
+                F.col("wav_matched").eqNullSafe(F.lit(True))
+                & F.col("wav_requested").eqNullSafe(F.lit(False)),
             ),
         ]
     )

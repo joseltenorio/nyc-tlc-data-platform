@@ -13,6 +13,7 @@ def source(tmp_path: Path) -> SilverSourceFile:
 def _fake_parquet_dir(path: Path, value: bytes = b"data") -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "part-00000.parquet").write_bytes(value)
+    (path / "_SUCCESS").write_text("", encoding="utf-8")
 
 
 def test_silver_paths_follow_dataset_and_partitions(app_config, tmp_path):

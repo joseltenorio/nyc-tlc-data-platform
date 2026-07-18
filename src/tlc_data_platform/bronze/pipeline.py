@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -14,6 +15,8 @@ from tlc_data_platform.audit.execution_repository import ExecutionRepository
 from tlc_data_platform.audit.file_registry_repository import FileRegistryRepository
 from tlc_data_platform.audit.file_version_repository import FileVersionRepository
 from tlc_data_platform.audit.summaries import AuditRepositories
+from tlc_data_platform.audit.parquet_metrics import parquet_metrics
+from tlc_data_platform.audit.unified import UnifiedAuditRepository
 from tlc_data_platform.bronze.manifest import ManifestWriter
 from tlc_data_platform.bronze.models import (
     AvailabilityRecord,
@@ -94,6 +97,7 @@ class BronzePipeline:
                     execution_repository=executions,
                 ),
                 versions=FileVersionRepository(database[names.file_versions]),
+                unified=UnifiedAuditRepository(database, self._config.audit),
             )
         return self._audit
 
@@ -230,6 +234,20 @@ class BronzePipeline:
                 "dry_run": dry_run,
             },
         )
+        if audit.unified is not None:
+            audit.unified.start_run(
+                execution_id,
+                layer="bronze",
+                execution_type="DRY_RUN" if dry_run else execution_type.upper(),
+                selection={
+                    "services": selection.services,
+                    "start_year": selection.start_year,
+                    "end_year": selection.end_year,
+                    "months": selection.months,
+                    "max_retries": self._config.download.max_retries,
+                },
+                started_at=started_at,
+            )
 
         outcomes: list[FileOutcome] = []
         availability: list[AvailabilityRecord] = []
@@ -319,6 +337,9 @@ class BronzePipeline:
 
             if downloaded:
                 spark = self._spark.get()
+                spark_guard = (
+                    self._spark.guard() if hasattr(self._spark, "guard") else None
+                )
                 for result, existing in downloaded:
                     outcome = self._validate_and_publish(
                         result,
@@ -326,6 +347,7 @@ class BronzePipeline:
                         execution_id,
                         spark,
                         audit,
+                        spark_guard=spark_guard,
                     )
                     outcomes.append(outcome)
                     manifest.add_outcome(outcome)
@@ -370,6 +392,8 @@ class BronzePipeline:
             audit.executions.fail(
                 execution_id, finished_at, exc, manifest_path
             )
+            if audit.unified is not None:
+                audit.unified.fail_run(execution_id, exc, layer="bronze")
             raise
 
     def _probe_candidates(
@@ -454,7 +478,30 @@ class BronzePipeline:
                     "DOWNLOADING",
                     remote_metadata=remote.to_dict(),
                 )
-                result = self._downloader.download(candidate, execution_id, remote)
+                def on_attempt(event: dict[str, Any]) -> None:
+                    if audit.unified is not None:
+                        audit.unified.record_download_attempt(
+                            execution_id,
+                            service=candidate.service,
+                            year=candidate.year,
+                            month=candidate.month,
+                            url=candidate.url,
+                            **event,
+                        )
+
+                download_parameters = inspect.signature(
+                    self._downloader.download
+                ).parameters
+                if "attempt_callback" in download_parameters:
+                    result = self._downloader.download(
+                        candidate, execution_id, remote, attempt_callback=on_attempt
+                    )
+                else:
+                    # Keeps injected/test downloaders compatible while the real
+                    # downloader records every retry through the callback.
+                    result = self._downloader.download(
+                        candidate, execution_id, remote
+                    )
                 audit.registry.set_status(
                     candidate,
                     execution_id,
@@ -530,6 +577,8 @@ class BronzePipeline:
         execution_id: str,
         spark: Any,
         audit: AuditRepositories,
+        *,
+        spark_guard: Any | None = None,
     ) -> FileOutcome:
         candidate = result.candidate
         outcome = FileOutcome(
@@ -538,6 +587,8 @@ class BronzePipeline:
             remote_metadata=result.remote_metadata,
             bytes_downloaded=result.bytes_downloaded,
             sha256=result.sha256,
+            attempt_count=result.attempt_count,
+            retry_count=result.retry_count,
         )
         current = (existing or {}).get("current") or {}
         previous_sha = current.get("sha256")
@@ -553,7 +604,13 @@ class BronzePipeline:
                 audit.registry.release_claim(candidate, execution_id)
                 return outcome
 
-            validation = self._validator.validate(result.path, candidate, spark)
+            def validation_action() -> Any:
+                return self._validator.validate(result.path, candidate, spark)
+            validation = (
+                spark_guard.run(validation_action)
+                if spark_guard is not None
+                else validation_action()
+            )
             final_path, archived_path = self._storage.promote(
                 result.path,
                 candidate,
@@ -633,7 +690,178 @@ class BronzePipeline:
         manifest.write(summary)
         self._cleanup_execution_state(audit, execution_id)
         audit.executions.finish(summary)
+        self._record_unified_audit(
+            audit, execution_id, summary, availability, outcomes
+        )
         return summary
+
+    def _record_unified_audit(
+        self,
+        audit: AuditRepositories,
+        execution_id: str,
+        summary: ExecutionSummary,
+        availability: list[AvailabilityRecord],
+        outcomes: list[FileOutcome],
+    ) -> None:
+        unified = audit.unified
+        if unified is None:
+            return
+        for outcome in outcomes:
+            validation = outcome.validation
+            physical = (
+                parquet_metrics(Path(outcome.local_path))
+                if outcome.local_path
+                else None
+            )
+            unified.record_dataset(
+                execution_id,
+                layer="bronze",
+                dataset_name=outcome.candidate.file_name,
+                dataset_type="source_parquet",
+                operation="download_validate_publish",
+                status=outcome.status,
+                path=outcome.local_path,
+                parquet_files=physical.parquet_files if physical else 0,
+                rows=(
+                    validation.parquet_num_rows
+                    if validation is not None
+                    else (physical.rows if physical else None)
+                ),
+                bytes_on_disk=(
+                    physical.bytes_on_disk
+                    if physical is not None
+                    else outcome.bytes_downloaded
+                ),
+                service=outcome.candidate.service,
+                year=outcome.candidate.year,
+                month=outcome.candidate.month,
+                metadata={
+                    "sha256": outcome.sha256,
+                    "attempt_count": outcome.attempt_count,
+                    "retry_count": outcome.retry_count,
+                    "schema_hash": validation.schema_hash if validation else None,
+                },
+            )
+            if outcome.status == "READY" and validation is not None:
+                required_ok = not validation.missing_required_columns and not validation.type_mismatches
+                unified.record_quality(
+                    execution_id,
+                    layer="bronze",
+                    dataset_name=outcome.candidate.file_name,
+                    rule_code="BRONZE_SCHEMA_CONTRACT",
+                    dimension="validity",
+                    severity="ERROR",
+                    status="PASSED" if required_ok else "FAILED",
+                    expected="required columns and compatible types",
+                    actual={
+                        "missing_required": validation.missing_required_columns,
+                        "type_mismatches": validation.type_mismatches,
+                    },
+                    failed_rows=0 if required_ok else validation.parquet_num_rows,
+                    context={"service": outcome.candidate.service, "year": outcome.candidate.year, "month": outcome.candidate.month},
+                )
+                unified.record_quality(
+                    execution_id,
+                    layer="bronze",
+                    dataset_name=outcome.candidate.file_name,
+                    rule_code="BRONZE_NON_EMPTY_PARQUET",
+                    dimension="completeness",
+                    severity="ERROR",
+                    status="PASSED" if validation.parquet_num_rows > 0 else "FAILED",
+                    expected="> 0 rows",
+                    actual=validation.parquet_num_rows,
+                    failed_rows=0 if validation.parquet_num_rows > 0 else 1,
+                )
+            elif outcome.status in {"FAILED", DEFERRED_REMOTE_ACCESS}:
+                unified.record_quality(
+                    execution_id,
+                    layer="bronze",
+                    dataset_name=outcome.candidate.file_name,
+                    rule_code="BRONZE_FILE_PROCESSING",
+                    dimension="availability",
+                    severity="ERROR" if outcome.status == "FAILED" else "WARNING",
+                    status="FAILED" if outcome.status == "FAILED" else "WARNING",
+                    message=outcome.error_message,
+                    context={"error_type": outcome.error_type},
+                )
+
+        outcome_by_period = {
+            outcome.candidate.period_id: outcome for outcome in outcomes
+        }
+        ready_periods = {
+            period_id
+            for period_id, outcome in outcome_by_period.items()
+            if outcome.status in {"READY", "SKIPPED_UNCHANGED"}
+        }
+        missing_set: set[str] = set()
+        details: list[dict[str, Any]] = []
+        for item in availability:
+            outcome = outcome_by_period.get(item.period_id)
+            physical_status = outcome.status if outcome is not None else None
+            detail = item.to_dict()
+            detail["processing_status"] = physical_status
+            detail["ready"] = item.period_id in ready_periods
+            details.append(detail)
+            if not item.applicable:
+                continue
+            if (
+                item.status == "NOT_PUBLISHED_YET"
+                and not self._config.audit.treat_not_published_as_missing
+            ):
+                continue
+            if item.status != "AVAILABLE" or item.period_id not in ready_periods:
+                missing_set.add(item.period_id)
+        missing = sorted(missing_set)
+        unified.record_coverage(
+            execution_id,
+            layer="bronze",
+            expected_count=summary.expected_periods,
+            available_count=summary.available_files,
+            ready_count=len(ready_periods),
+            missing=missing,
+            not_applicable_count=summary.not_applicable_periods,
+            not_published_count=summary.not_published_files,
+            deferred_count=sum(item.status == DEFERRED_REMOTE_ACCESS for item in availability),
+            details=details,
+        )
+        expected_published = max(
+            0,
+            summary.expected_periods
+            - summary.not_applicable_periods
+            - (
+                summary.not_published_files
+                if not self._config.audit.treat_not_published_as_missing
+                else 0
+            ),
+        )
+        unified.record_quality(
+            execution_id,
+            layer="bronze",
+            dataset_name="bronze_layer",
+            rule_code="BRONZE_EXPECTED_DATASETS_READY",
+            dimension="completeness",
+            severity="ERROR",
+            status="PASSED" if not missing else "FAILED",
+            expected=expected_published,
+            actual=len(ready_periods),
+            failed_rows=len(missing),
+            context={"missing_periods": missing},
+        )
+        unified.finish_run(
+            execution_id,
+            status=summary.status,
+            finished_at=summary.finished_at,
+            metrics={
+                "parquet_files_expected": summary.applicable_periods,
+                "parquet_files_available": summary.available_files,
+                "parquet_files_processed": summary.ready_files,
+                "parquet_files_skipped": summary.skipped_files,
+                "parquet_files_failed": summary.failed_files,
+                "download_attempts": summary.total_download_attempts,
+                "download_retries": summary.total_retries,
+                "bytes_downloaded": summary.total_bytes_downloaded,
+            },
+        )
 
     @staticmethod
     def _build_summary(
@@ -685,6 +913,8 @@ class BronzePipeline:
                 outcome.bytes_downloaded or 0 for outcome in outcomes
             ),
             manifest_path=manifest_path,
+            total_download_attempts=sum(outcome.attempt_count for outcome in outcomes),
+            total_retries=sum(outcome.retry_count for outcome in outcomes),
         )
 
     @staticmethod
@@ -699,6 +929,8 @@ class BronzePipeline:
         )
         outcome.error_type = type(exc).__name__
         outcome.error_message = str(exc)
+        outcome.attempt_count = int(getattr(exc, "attempt_count", 0) or 0)
+        outcome.retry_count = int(getattr(exc, "retry_count", 0) or 0)
         if isinstance(exc, requests.HTTPError) and exc.response is not None:
             outcome.remote_metadata = RemoteMetadata(
                 available=False,

@@ -1,17 +1,15 @@
-from datetime import datetime
 
 import pytest
 
 pyspark = pytest.importorskip("pyspark")
-from pyspark.sql import SparkSession
 
-from tlc_data_platform.silver.enrichment import SilverReferenceData, enrich_trip
-from tlc_data_platform.silver.master import to_master
-from tlc_data_platform.silver.models import SilverTransformContext
-from tlc_data_platform.silver.transformers.fhv import transform as transform_fhv
-from tlc_data_platform.silver.transformers.fhvhv import transform as transform_fhvhv
-from tlc_data_platform.silver.transformers.green import transform as transform_green
-from tlc_data_platform.silver.transformers.yellow import transform as transform_yellow
+from tlc_data_platform.silver.enrichment import SilverReferenceData, enrich_trip  # noqa: E402
+from tlc_data_platform.silver.master import to_master  # noqa: E402
+from tlc_data_platform.silver.models import SilverTransformContext  # noqa: E402
+from tlc_data_platform.silver.transformers.fhv import transform as transform_fhv  # noqa: E402
+from tlc_data_platform.silver.transformers.fhvhv import transform as transform_fhvhv  # noqa: E402
+from tlc_data_platform.silver.transformers.green import transform as transform_green  # noqa: E402
+from tlc_data_platform.silver.transformers.yellow import transform as transform_yellow  # noqa: E402
 
 
 def context(service: str) -> SilverTransformContext:

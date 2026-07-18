@@ -1,4 +1,3 @@
-from pathlib import Path
 
 import pytest
 
@@ -89,3 +88,36 @@ def test_rejects_when_disk_space_is_insufficient(app_config, monkeypatch):
 
     with pytest.raises(InsufficientDiskSpaceError):
         downloader.download(candidate(), "run", RemoteMetadata(True, content_length=len(body)))
+
+class SequenceHttp:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def request(self, *args, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def test_retries_complete_download_after_http_202(app_config, monkeypatch):
+    body = b"PAR1abcdefghPAR1"
+    http = SequenceHttp(
+        [
+            FakeResponse(b"<html>pending</html>", "text/html", status=202),
+            FakeResponse(body),
+        ]
+    )
+    storage = BronzeStorage(app_config.storage)
+    events = []
+    monkeypatch.setattr("tlc_data_platform.ingestion.downloader.time.sleep", lambda _: None)
+    result = FileDownloader(http, storage, app_config.download).download(
+        candidate(),
+        "run-retry",
+        RemoteMetadata(True, content_length=len(body)),
+        attempt_callback=events.append,
+    )
+    assert http.calls == 2
+    assert result.attempt_count == 2
+    assert result.retry_count == 1
+    assert [event["outcome"] for event in events] == ["RETRY", "SUCCESS"]
+    assert events[0]["max_attempts"] == 6

@@ -6,15 +6,15 @@ from tlc_data_platform.core.exceptions import ConfigurationError
 from tlc_data_platform.core.settings import resolve_selection
 
 
-def test_default_periods_start_in_2019(app_config):
-    assert app_config.period.historical_start_year == 2019
+def test_default_periods_start_in_2023(app_config):
+    assert app_config.period.historical_start_year == 2023
     assert app_config.period.historical_end_year == 2025
     assert app_config.period.incremental_year == 2026
 
 
-def test_historical_selection_uses_2019_to_2025(app_config):
+def test_historical_selection_uses_2023_to_2025(app_config):
     selection = resolve_selection(app_config, mode="historical")
-    assert (selection.start_year, selection.end_year) == (2019, 2025)
+    assert (selection.start_year, selection.end_year) == (2023, 2025)
 
 
 def test_incremental_selection_uses_2026(app_config):
@@ -45,3 +45,12 @@ def test_disabled_service_is_rejected(app_config):
     config = replace(app_config, services=services)
     with pytest.raises(ConfigurationError, match="deshabilitados"):
         resolve_selection(config, mode="run", services=["green"])
+
+
+def test_resource_limits_and_unified_audit_are_loaded(app_config):
+    assert app_config.gold.spark.master == "local[2]"
+    assert app_config.gold.spark.driver_memory == "3g"
+    assert app_config.gold.spark.shuffle_partitions == 512
+    assert app_config.gold.spark.local_dir.as_posix().endswith("data/tmp/spark/gold")
+    assert app_config.ml.spark.driver_memory == "3g"
+    assert app_config.audit.collections.pipeline_runs == "audit_pipeline_runs"

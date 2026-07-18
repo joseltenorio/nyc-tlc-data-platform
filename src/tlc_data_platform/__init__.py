@@ -1,3 +1,3 @@
 """NYC TLC data platform package."""
 
-__version__ = "1.1.0"
+__version__ = "3.0.0"

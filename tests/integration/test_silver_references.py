@@ -1,13 +1,10 @@
 import json
-from dataclasses import replace
 
 import pytest
 
 pyspark = pytest.importorskip("pyspark")
-from pyspark.sql import SparkSession
 
-from tlc_data_platform.silver.references import SilverReferencePipeline
-from tlc_data_platform.silver.spark import SilverSparkProvider
+from tlc_data_platform.silver.references import SilverReferencePipeline  # noqa: E402
 
 
 class Response:

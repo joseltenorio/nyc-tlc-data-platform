@@ -11,7 +11,7 @@ download:
   max_hvfhv_workers: 1
   chunk_size_bytes: 8388608
   minimum_file_size_bytes: 1024
-  max_retries: 3
+  max_retries: 5
   initial_backoff_seconds: 5
   max_backoff_seconds: 30
   connect_timeout_seconds: 15
@@ -27,9 +27,12 @@ validation:
 
 spark:
   app_name: nyc-tlc-data-platform-bronze-validator
-  master: local[*]
+  master: local[2]
   log_level: WARN
-  driver_memory: 4g
+  driver_memory: 2g
+  local_dir: data/tmp/spark/bronze
+  max_temp_bytes: 10737418240
+  minimum_free_space_bytes: 10737418240
 
 mongo:
   uri_environment_variable: MONGODB_URI

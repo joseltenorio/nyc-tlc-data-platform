@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from tlc_data_platform.core.settings import resolve_silver_selection
 from tlc_data_platform.silver.source_catalog import SilverSourceCatalog
@@ -54,3 +53,30 @@ def test_catalog_marks_hvfhv_january_2019_not_applicable(app_config):
     sources, states = SilverSourceCatalog(app_config, FakeCollection({})).list(selection)
     assert sources == []
     assert states[0].status == "NOT_APPLICABLE"
+
+
+class AvailabilityCollection:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find_one(self, key, projection=None, sort=None):
+        return self.docs.get((key["service"], key["year"], key["month"]))
+
+
+def test_catalog_preserves_not_published_state(app_config):
+    selection = resolve_silver_selection(
+        app_config,
+        "silver-run",
+        services=["yellow"],
+        start_year=2026,
+        end_year=2026,
+        months=[12],
+    )
+    availability = AvailabilityCollection(
+        {("yellow", 2026, 12): {"status": "NOT_PUBLISHED_YET"}}
+    )
+    sources, states = SilverSourceCatalog(
+        app_config, FakeCollection({}), availability
+    ).list(selection)
+    assert sources == []
+    assert states[0].status == "BRONZE_NOT_PUBLISHED"

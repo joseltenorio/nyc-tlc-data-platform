@@ -4,22 +4,30 @@ from pathlib import Path
 from typing import Any
 
 from tlc_data_platform.core.settings import AppConfig, RunSelection
+from tlc_data_platform.ingestion.expected_periods import is_period_applicable
 from tlc_data_platform.silver.models import SilverPeriodState, SilverSourceFile
 
 
 class SilverSourceCatalog:
-    def __init__(self, config: AppConfig, bronze_registry: Any | None) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        bronze_registry: Any | None,
+        bronze_availability: Any | None = None,
+    ) -> None:
         self._config = config
         self._registry = bronze_registry
+        self._availability = bronze_availability
 
     def list(self, selection: RunSelection) -> tuple[list[SilverSourceFile], list[SilverPeriodState]]:
         sources: list[SilverSourceFile] = []
         states: list[SilverPeriodState] = []
         for service in selection.services:
-            available_from = self._config.services[service].available_from
             for year in range(selection.start_year, selection.end_year + 1):
                 for month in selection.months:
-                    if (year, month) < (available_from.year, available_from.month):
+                    if not is_period_applicable(
+                        self._config, service, year, month
+                    ):
                         states.append(SilverPeriodState(service, year, month, "NOT_APPLICABLE"))
                         continue
                     doc = self._registry.find_one(
@@ -30,8 +38,32 @@ class SilverSourceCatalog:
                     if source is None and not self._config.silver.execution.require_bronze_ready_registry:
                         source = self._from_filesystem(service, year, month)
                     if source is None:
-                        detail = "No existe file_registry READY o el archivo físico no está disponible"
-                        states.append(SilverPeriodState(service, year, month, "BRONZE_NOT_READY", detail=detail))
+                        availability_status = self._latest_availability_status(
+                            service, year, month
+                        )
+                        if availability_status == "NOT_PUBLISHED_YET":
+                            state_status = "BRONZE_NOT_PUBLISHED"
+                            detail = "El archivo todavía no fue publicado por TLC"
+                        elif availability_status in {
+                            "DEFERRED_REMOTE_ACCESS",
+                            "FAILED_TO_PROBE",
+                        }:
+                            state_status = "BRONZE_DEFERRED"
+                            detail = (
+                                "La disponibilidad Bronze quedó diferida por un problema "
+                                "remoto temporal"
+                            )
+                        else:
+                            state_status = "BRONZE_NOT_READY"
+                            detail = (
+                                "No existe file_registry READY o el archivo físico no está "
+                                "disponible"
+                            )
+                        states.append(
+                            SilverPeriodState(
+                                service, year, month, state_status, detail=detail
+                            )
+                        )
                     else:
                         sources.append(source)
                         states.append(
@@ -45,6 +77,24 @@ class SilverSourceCatalog:
                             )
                         )
         return sources, states
+
+
+    def _latest_availability_status(
+        self, service: str, year: int, month: int
+    ) -> str | None:
+        if self._availability is None:
+            return None
+        query = {"service": service, "year": year, "month": month}
+        projection = {"_id": 0, "status": 1, "checked_at": 1}
+        try:
+            document = self._availability.find_one(
+                query, projection, sort=[("checked_at", -1)]
+            )
+        except TypeError:
+            # Lightweight test doubles and older collection wrappers may not
+            # expose the optional sort parameter.
+            document = self._availability.find_one(query, projection)
+        return str(document.get("status")) if document else None
 
     def _from_registry(self, service: str, year: int, month: int, doc: dict[str, Any] | None) -> SilverSourceFile | None:
         if not doc or doc.get("status") != "READY":

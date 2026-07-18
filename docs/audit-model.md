@@ -1,121 +1,84 @@
-# Modelo de auditoría Bronze y Silver
+# Modelo de auditoría y calidad
 
-MongoDB almacena control operativo y trazabilidad. Los viajes permanecen en Parquet.
+Los viajes permanecen en Parquet. MongoDB conserva metadata operativa, trazabilidad, calidad y cobertura.
 
-## Bronze
+## Contrato unificado para dashboards
 
-### `pipeline_executions`
+### `audit_pipeline_runs`
 
-Una fila documental por ejecución Bronze. Incluye selección, tiempos, estado, conteos y manifiesto.
-
-### `file_availability`
-
-Una fila por periodo revisado y ejecución. Estados principales:
+Una fila documental por ejecución de capa y por ejecución padre `platform`:
 
 ```text
-NOT_APPLICABLE
-NOT_PUBLISHED_YET
-AVAILABLE
-FAILED_TO_PROBE
-DEFERRED_REMOTE_ACCESS
+execution_id
+parent_execution_id
+layer
+execution_type
+status
+started_at / finished_at / duration_seconds
+selection
+metrics
+warnings
+error_type / error_message
 ```
 
-### `file_registry`
+### `audit_dataset_events`
 
-Una fila vigente por:
+Un evento por dataset físico leído, procesado o publicado:
 
 ```text
-service + year + month
+layer, dataset_name, dataset_type, operation, status
+path, parquet_files, rows, bytes_on_disk
+service, year, month, source_dataset
+error_type, error_message, metadata
 ```
 
-Mantiene estado actual, claim, checksum, ruta física, metadata remota y validación Parquet.
+Permite obtener número de Parquet por capa sin contar viajes en MongoDB.
 
-### `file_versions`
+### `audit_quality_events`
 
-Una fila por:
+Un documento por regla:
 
 ```text
-service + year + month + sha256
+rule_code, dimension, severity, status
+expected, actual, failed_rows, message, context
 ```
 
-Conserva versiones oficiales vigentes o archivadas.
+Dimensiones usadas: validez, completitud, reconciliación, confiabilidad y observabilidad.
 
-## Silver
+### `audit_coverage_snapshots`
 
-### `silver_pipeline_executions`
-
-Una fila por ejecución Silver con:
-
-- selección solicitada;
-- estado;
-- cantidad de fuentes, procesadas, omitidas y fallidas;
-- filas leídas, válidas, rechazadas y con advertencias;
-- resultado de actualización/reutilización de referencias;
-- ruta del manifiesto.
-
-### `silver_file_registry`
-
-Una fila vigente por:
+Fotografía por ejecución/capa:
 
 ```text
-service + year + month
+expected_count
+available_count
+ready_count
+missing_count
+not_applicable_count
+not_published_count
+deferred_count
+coverage_rate
+missing
+details
 ```
 
-Contiene:
+`NOT_PUBLISHED_YET` no se considera pérdida mientras `treat_not_published_as_missing=false`.
 
-- checksum Bronze utilizado;
-- estado Silver;
-- paths curado, rechazado y master;
-- conteos de filas;
-- reconciliación;
-- claim temporal;
-- última ejecución.
+### `audit_download_attempts`
 
-### `silver_quality_results`
+Un documento por intento completo de descarga Bronze. Cinco reintentos producen como máximo seis documentos para un archivo.
 
-Una fila por:
+## Colecciones específicas
 
-```text
-execution_id + service + year + month + rule_code
-```
-
-Incluye severidad y cantidad de filas afectadas.
-
-### `silver_reconciliations`
-
-Una fila por archivo procesado. Registra:
-
-```text
-bronze_num_rows
-rows_read
-rows_valid
-rows_rejected
-reconciliation_status
-```
-
-## Claims
-
-Bronze y Silver usan claims con expiración para evitar procesamiento concurrente del mismo periodo. El claim puede recuperarse cuando:
-
-- expiró;
-- la ejecución dueña terminó;
-- la ejecución dueña no existe;
-- pertenece a la misma ejecución.
-
-Los estados finales limpian el claim.
+Se conservan las colecciones Bronze, Silver, Gold y ML existentes porque contienen detalles transaccionales adicionales, como claims, versiones, reglas por archivo, métricas de modelos y reconciliaciones.
 
 ## Manifiestos
 
-Bronze:
-
 ```text
-data/manifests/<execution_id>.json
+data/manifests/*.json
+data/manifests/silver/*.json
+data/manifests/gold/*.json
+data/manifests/ml/*.json
 ```
 
-Silver y referencias:
-
-```text
-data/manifests/silver/<execution_id>.json
-```
-
-Los manifiestos permiten revisar una ejecución sin consultar MongoDB y complementan, no sustituyen, el registro transaccional.
+Los manifiestos permiten revisar ejecuciones aunque MongoDB no esté disponible. Streamlit los usa como fallback.

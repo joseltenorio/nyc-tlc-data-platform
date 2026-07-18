@@ -69,7 +69,7 @@ Si las referencias faltan y `refresh_references_if_missing=true`, el pipeline la
 
 ## 4. Ejecutar Silver
 
-Histórico 2019–2025:
+Histórico configurado (Yellow/Green/FHV 2023–2025 y HVFHV 2023):
 
 ```powershell
 docker compose run --rm silver silver-historical
@@ -130,7 +130,7 @@ docker compose run --rm pipeline medallion-run `
   --start-year 2025 `
   --end-year 2025 `
   --months 1 2 `
-  --workers 4
+  --workers 1
 ```
 
 La secuencia combinada no envía a Silver periodos que Bronze no dejó en `READY`.

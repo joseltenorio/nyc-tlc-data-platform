@@ -19,6 +19,21 @@ class SilverStorage:
         ]
         for root in roots:
             root.mkdir(parents=True, exist_ok=True)
+        self.recover_interrupted_promotions()
+
+    def recover_interrupted_promotions(self) -> None:
+        """Restores a previous partition after a host/process interruption."""
+        root = self.config.silver_root
+        if not root.is_dir():
+            return
+        for backup in sorted(root.rglob("*.previous")):
+            if not backup.is_dir():
+                continue
+            destination = backup.with_name(backup.name.removesuffix(".previous"))
+            if destination.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                backup.replace(destination)
 
     def curated_partition(self, source: SilverSourceFile) -> Path:
         dataset = self.config.datasets[source.service]
@@ -64,7 +79,11 @@ class SilverStorage:
 
     @staticmethod
     def _has_parquet(path: Path) -> bool:
-        return path.is_dir() and any(path.glob("*.parquet"))
+        return path.is_dir() and any(path.rglob("*.parquet"))
+
+    @staticmethod
+    def _is_complete_dataset(path: Path) -> bool:
+        return path.is_dir() and (path / "_SUCCESS").is_file()
 
     @staticmethod
     def _replace_many(pairs: list[tuple[Path, Path]]) -> None:
@@ -78,6 +97,8 @@ class SilverStorage:
         for temp_path, _ in pairs:
             if not temp_path.is_dir():
                 raise FileNotFoundError(f"No existe la salida temporal: {temp_path}")
+            if not (temp_path / "_SUCCESS").is_file():
+                raise RuntimeError(f"Spark no completó la salida temporal: {temp_path}")
 
         backups: dict[Path, Path] = {}
         promoted: list[Path] = []
@@ -139,7 +160,7 @@ class SilverStorage:
         paths = [self.curated_partition(source), self.rejected_partition(source)]
         if include_master:
             paths.append(self.master_partition(source))
-        return all(self._has_parquet(path) for path in paths)
+        return all(self._is_complete_dataset(path) for path in paths)
 
     def cleanup_execution(self, execution_id: str) -> None:
         root = self.config.temporary_root / execution_id

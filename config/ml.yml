@@ -1,0 +1,71 @@
+storage:
+  ml_root: data/ml
+  model_root: data/models
+  temporary_root: data/tmp/ml
+  manifests_root: data/manifests/ml
+
+execution:
+  random_seed: 42
+  parquet_compression: snappy
+  continue_on_model_error: true
+
+spark:
+  app_name: nyc-tlc-data-platform-ml
+  master: local[2]
+  log_level: WARN
+  driver_memory: 3g
+  shuffle_partitions: 512
+  local_dir: data/tmp/spark/ml
+  max_temp_bytes: 32212254720
+  minimum_free_space_bytes: 21474836480
+
+forecast:
+  feature_dataset: ml_zone_hourly_demand_features
+  prediction_dataset: demand_forecast
+  anomaly_dataset: demand_anomalies
+  metrics_dataset: demand_forecast_metrics
+  train_start: "2023-01-01 00:00:00"
+  train_end: "2025-06-30 23:00:00"
+  validation_end: "2025-09-30 23:00:00"
+  test_end: "2025-12-31 23:00:00"
+  forecast_horizon_hours: 24
+  minimum_active_hours: 168
+  minimum_total_trips: 500
+  anomaly_zscore_threshold: 3.0
+  algorithms: [gbt, random_forest, poisson_glr]
+  gbt_max_iter: 60
+  gbt_max_depth: 8
+  random_forest_num_trees: 80
+  random_forest_max_depth: 12
+
+segmentation:
+  feature_dataset: ml_zone_profile_features
+  assignment_dataset: zone_segments
+  profile_dataset: zone_segment_profiles
+  metrics_dataset: zone_segmentation_metrics
+  k_min: 3
+  k_max: 8
+  max_iter: 50
+
+wait_risk:
+  feature_dataset: ml_hvfhv_wait_features
+  prediction_dataset: hvfhv_wait_risk_predictions
+  metrics_dataset: hvfhv_wait_risk_metrics
+  importance_dataset: hvfhv_wait_risk_feature_importance
+  excessive_wait_threshold_seconds: 600
+  train_end: "2023-08-31 23:59:59"
+  validation_end: "2023-10-31 23:59:59"
+  test_end: "2023-12-31 23:59:59"
+  algorithms: [logistic_regression, random_forest, gbt]
+  logistic_max_iter: 80
+  random_forest_num_trees: 100
+  random_forest_max_depth: 12
+  gbt_max_iter: 70
+  gbt_max_depth: 8
+
+mongo_collections:
+  training_runs: ml_training_runs
+  model_registry: ml_model_registry
+  prediction_runs: ml_prediction_runs
+  metrics: ml_metrics
+  processing_attempts: processing_attempts

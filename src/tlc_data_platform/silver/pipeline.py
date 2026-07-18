@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 from typing import Any
 
 from tlc_data_platform.audit.silver_execution_repository import SilverExecutionRepository
@@ -12,6 +13,8 @@ from tlc_data_platform.audit.silver_quality_repository import SilverQualityRepos
 from tlc_data_platform.audit.silver_reconciliation_repository import (
     SilverReconciliationRepository,
 )
+from tlc_data_platform.audit.parquet_metrics import parquet_metrics
+from tlc_data_platform.audit.unified import UnifiedAuditRepository
 from tlc_data_platform.core.exceptions import SilverReconciliationError
 from tlc_data_platform.core.settings import AppConfig, RunSelection
 from tlc_data_platform.mongodb.client import MongoClientProvider
@@ -77,14 +80,20 @@ class SilverPipeline:
                 reconciliations=SilverReconciliationRepository(
                     database[names.reconciliations]
                 ),
+                unified=UnifiedAuditRepository(database, self._config.audit),
             )
         return self._audit, database
 
     def _catalog(self, database: Any) -> SilverSourceCatalog:
         if self._source_catalog is not None:
             return self._source_catalog
-        bronze_name = self._config.mongo.collections.file_registry
-        return SilverSourceCatalog(self._config, database[bronze_name])
+        bronze_registry = self._config.mongo.collections.file_registry
+        bronze_availability = self._config.mongo.collections.file_availability
+        return SilverSourceCatalog(
+            self._config,
+            database[bronze_registry],
+            database[bronze_availability],
+        )
 
     def plan(self, selection: RunSelection) -> SilverPlanSummary:
         self._storage.ensure_directories()
@@ -151,7 +160,8 @@ class SilverPipeline:
             expected_periods=len(states),
             bronze_ready_periods=len(sources),
             bronze_missing_periods=sum(
-                state.status == "BRONZE_NOT_READY" for state in states
+                state.status in {"BRONZE_NOT_READY", "BRONZE_DEFERRED"}
+                for state in states
             ),
             already_processed_periods=already,
             pending_periods=max(0, len(sources) - already),
@@ -189,11 +199,26 @@ class SilverPipeline:
                 "refresh_references": refresh_references,
             },
         )
+        if audit.unified is not None:
+            audit.unified.start_run(
+                execution_id,
+                layer="silver",
+                execution_type=execution_type.upper(),
+                selection={
+                    "services": selection.services,
+                    "start_year": selection.start_year,
+                    "end_year": selection.end_year,
+                    "months": selection.months,
+                    "force": force,
+                },
+                started_at=started_at,
+            )
 
         outcomes: list[SilverFileOutcome] = []
         source_file_count = 0
         reference_status: str | None = None
         references: SilverReferenceData | None = None
+        states: list[Any] = []
         try:
             sources, states = self._catalog(database).list(selection)
             source_file_count = len(sources)
@@ -243,6 +268,7 @@ class SilverPipeline:
                 reference_refresh_status=reference_status,
             )
             audit.executions.finish(summary)
+            self._record_unified_audit(audit, summary, states, outcomes)
             return summary
         except Exception as exc:
             LOGGER.exception("La ejecución Silver falló: %s", exc)
@@ -262,6 +288,8 @@ class SilverPipeline:
             audit.executions.fail(
                 execution_id, finished, exc, temporary_summary.manifest_path
             )
+            if audit.unified is not None:
+                audit.unified.fail_run(execution_id, exc, layer="silver")
             raise
         finally:
             if references is not None:
@@ -279,6 +307,232 @@ class SilverPipeline:
                     exc,
                 )
             self._storage.cleanup_execution(execution_id)
+
+    def _record_unified_audit(
+        self,
+        audit: SilverAuditRepositories,
+        summary: SilverExecutionSummary,
+        states: list[Any],
+        outcomes: list[SilverFileOutcome],
+    ) -> None:
+        unified = audit.unified
+        if unified is None:
+            return
+        for outcome in outcomes:
+            source = outcome.source
+            outputs = [
+                ("curated", outcome.curated_path),
+                ("rejected", outcome.rejected_path),
+                ("master", outcome.master_path),
+            ]
+            if outcome.status == "FAILED" and not any(path for _, path in outputs):
+                unified.record_dataset(
+                    summary.execution_id,
+                    layer="silver",
+                    dataset_name=f"{source.service}_trips",
+                    dataset_type="curated_partition",
+                    operation="transform_publish",
+                    status="FAILED",
+                    service=source.service,
+                    year=source.year,
+                    month=source.month,
+                    source_dataset=source.path.name,
+                    error=RuntimeError(
+                        f"{outcome.error_type or 'SilverError'}: {outcome.error_message or 'fallo sin detalle'}"
+                    ),
+                    metadata={"source_sha256": source.source_sha256},
+                )
+            for dataset_type, output_path in outputs:
+                if not output_path:
+                    continue
+                metrics = parquet_metrics(Path(output_path))
+                unified.record_dataset(
+                    summary.execution_id,
+                    layer="silver",
+                    dataset_name=f"{source.service}_{dataset_type}",
+                    dataset_type=dataset_type,
+                    operation="transform_publish",
+                    status=outcome.status,
+                    path=output_path,
+                    parquet_files=metrics.parquet_files,
+                    rows=metrics.rows,
+                    bytes_on_disk=metrics.bytes_on_disk,
+                    service=source.service,
+                    year=source.year,
+                    month=source.month,
+                    source_dataset=source.path.name,
+                    metadata={"source_sha256": source.source_sha256},
+                )
+            if outcome.status == "READY":
+                for rule_code, failed_rows in outcome.rule_counts.items():
+                    severity = outcome.rule_severities.get(rule_code, "WARNING")
+                    unified.record_quality(
+                        summary.execution_id,
+                        layer="silver",
+                        dataset_name=f"{source.service}_trips",
+                        rule_code=rule_code,
+                        dimension="validity",
+                        severity=severity,
+                        status=(
+                            "FAILED"
+                            if severity == "ERROR" and failed_rows
+                            else ("WARNING" if failed_rows else "PASSED")
+                        ),
+                        failed_rows=failed_rows,
+                        context={
+                            "service": source.service,
+                            "year": source.year,
+                            "month": source.month,
+                        },
+                    )
+                reconciliation_ok = bool(
+                    outcome.reconciliation_status
+                    and outcome.reconciliation_status.startswith("MATCHED")
+                )
+                unified.record_quality(
+                    summary.execution_id,
+                    layer="silver",
+                    dataset_name=f"{source.service}_trips",
+                    rule_code="SILVER_ROW_RECONCILIATION",
+                    dimension="reconciliation",
+                    severity="ERROR",
+                    status="PASSED" if reconciliation_ok else "FAILED",
+                    expected=outcome.rows_read,
+                    actual=outcome.rows_valid + outcome.rows_rejected,
+                    failed_rows=abs(
+                        outcome.rows_read
+                        - outcome.rows_valid
+                        - outcome.rows_rejected
+                    ),
+                    context={
+                        "service": source.service,
+                        "year": source.year,
+                        "month": source.month,
+                    },
+                )
+            elif outcome.status == "SKIPPED_UNCHANGED":
+                unified.record_quality(
+                    summary.execution_id,
+                    layer="silver",
+                    dataset_name=f"{source.service}_trips",
+                    rule_code="SILVER_IDEMPOTENT_OUTPUTS_PRESENT",
+                    dimension="completeness",
+                    severity="ERROR",
+                    status="PASSED",
+                    expected="curated, rejected and master Parquet present",
+                    actual=True,
+                    failed_rows=0,
+                    context={
+                        "service": source.service,
+                        "year": source.year,
+                        "month": source.month,
+                    },
+                )
+            elif outcome.status == "FAILED":
+                unified.record_quality(
+                    summary.execution_id,
+                    layer="silver",
+                    dataset_name=f"{source.service}_trips",
+                    rule_code="SILVER_PARTITION_PROCESSING",
+                    dimension="reliability",
+                    severity="ERROR",
+                    status="FAILED",
+                    message=outcome.error_message,
+                    context={
+                        "service": source.service,
+                        "year": source.year,
+                        "month": source.month,
+                        "error_type": outcome.error_type,
+                    },
+                )
+
+        outcome_by_period = {outcome.source.period_id: outcome for outcome in outcomes}
+        not_published = sum(
+            getattr(state, "status", "") == "BRONZE_NOT_PUBLISHED"
+            for state in states
+        )
+        not_applicable = sum(
+            getattr(state, "status", "") == "NOT_APPLICABLE" for state in states
+        )
+        deferred = sum(
+            getattr(state, "status", "") == "BRONZE_DEFERRED" for state in states
+        )
+        missing: list[str] = []
+        details: list[dict[str, Any]] = []
+        ready = 0
+        for state in states:
+            period_id = state.period_id
+            outcome = outcome_by_period.get(period_id)
+            detail = state.to_dict()
+            detail["processing_status"] = outcome.status if outcome else None
+            detail["ready"] = bool(
+                outcome
+                and outcome.status in {"READY", "SKIPPED_UNCHANGED"}
+            )
+            details.append(detail)
+            if detail["ready"]:
+                ready += 1
+                continue
+            if state.status == "NOT_APPLICABLE":
+                continue
+            if (
+                state.status == "BRONZE_NOT_PUBLISHED"
+                and not self._config.audit.treat_not_published_as_missing
+            ):
+                continue
+            missing.append(period_id)
+
+        missing = sorted(set(missing))
+        unified.record_coverage(
+            summary.execution_id,
+            layer="silver",
+            expected_count=len(states),
+            available_count=summary.source_files,
+            ready_count=ready,
+            missing=missing,
+            not_applicable_count=not_applicable,
+            not_published_count=not_published,
+            deferred_count=deferred,
+            details=details,
+        )
+        expected_published = max(
+            0,
+            len(states)
+            - not_applicable
+            - (
+                not_published
+                if not self._config.audit.treat_not_published_as_missing
+                else 0
+            ),
+        )
+        unified.record_quality(
+            summary.execution_id,
+            layer="silver",
+            dataset_name="silver_layer",
+            rule_code="SILVER_EXPECTED_PARTITIONS_READY",
+            dimension="completeness",
+            severity="ERROR",
+            status="PASSED" if not missing else "FAILED",
+            expected=expected_published,
+            actual=ready,
+            failed_rows=len(missing),
+            context={"missing_periods": missing},
+        )
+        unified.finish_run(
+            summary.execution_id,
+            status=summary.status,
+            finished_at=summary.finished_at,
+            metrics={
+                "parquet_files_input": summary.source_files,
+                "parquet_partitions_processed": summary.processed_files,
+                "parquet_partitions_skipped": summary.skipped_files,
+                "parquet_partitions_failed": summary.failed_files,
+                "rows_read": summary.rows_read,
+                "rows_valid": summary.rows_valid,
+                "rows_rejected": summary.rows_rejected,
+                "warning_rows": summary.warning_rows,
+            },
+        )
 
     def _ensure_references(self, *, refresh_references: bool | None) -> str:
         execution = self._config.silver.execution
@@ -316,7 +570,17 @@ class SilverPipeline:
         if not force and audit.registry.is_unchanged(
             source, self._storage.outputs_exist(source, include_master)
         ):
-            outcome = SilverFileOutcome(source, "SKIPPED_UNCHANGED")
+            outcome = SilverFileOutcome(
+                source,
+                "SKIPPED_UNCHANGED",
+                curated_path=str(self._storage.curated_partition(source)),
+                rejected_path=str(self._storage.rejected_partition(source)),
+                master_path=(
+                    str(self._storage.master_partition(source))
+                    if include_master
+                    else None
+                ),
+            )
             outcome.finish()
             return outcome
         if not audit.registry.claim(source, execution_id):
@@ -340,19 +604,37 @@ class SilverPipeline:
             transformed = get_transformer(source.service)(
                 raw, context, self._config.silver.quality
             )
+            # Cache only the transformed monthly partition. Caching valid and
+            # rejected separately duplicated a large part of HVFHV in Spark spill.
             transformed = enrich_trip(transformed, source.service, references).persist()
             valid, rejected = split_valid_rejected(transformed)
-            valid = valid.persist()
-            rejected = rejected.persist()
 
-            outcome.rows_read = transformed.count()
-            outcome.rows_valid = valid.count()
-            outcome.rows_rejected = rejected.count()
-            outcome.warning_rows = transformed.filter(
-                "quality_warning_count > 0"
-            ).count()
-            outcome.rule_counts, outcome.rule_severities = self._rule_counts(
-                transformed
+            guard = (
+                self._spark.guard() if hasattr(self._spark, "guard") else None
+            )
+            run_guarded = guard.run if guard is not None else (lambda action: action())
+            from pyspark.sql import functions as F
+
+            counts = run_guarded(
+                lambda: transformed.agg(
+                    F.count(F.lit(1)).alias("rows_read"),
+                    F.sum(
+                        F.when(F.col("quality_error_count") == 0, 1).otherwise(0)
+                    ).alias("rows_valid"),
+                    F.sum(
+                        F.when(F.col("quality_error_count") > 0, 1).otherwise(0)
+                    ).alias("rows_rejected"),
+                    F.sum(
+                        F.when(F.col("quality_warning_count") > 0, 1).otherwise(0)
+                    ).alias("warning_rows"),
+                ).first()
+            )
+            outcome.rows_read = int(counts["rows_read"] or 0)
+            outcome.rows_valid = int(counts["rows_valid"] or 0)
+            outcome.rows_rejected = int(counts["rows_rejected"] or 0)
+            outcome.warning_rows = int(counts["warning_rows"] or 0)
+            outcome.rule_counts, outcome.rule_severities = run_guarded(
+                lambda: self._rule_counts(transformed)
             )
             outcome.reconciliation_status = self._reconcile(source, outcome)
 
@@ -375,15 +657,19 @@ class SilverPipeline:
                     shutil.rmtree(path)
                 path.parent.mkdir(parents=True, exist_ok=True)
 
-            valid.write.mode("overwrite").options(**writer_options).parquet(
-                str(curated_temp)
+            run_guarded(
+                lambda: valid.write.mode("overwrite").options(**writer_options).parquet(
+                    str(curated_temp)
+                )
             )
-            rejected.write.mode("overwrite").options(**writer_options).parquet(
-                str(rejected_temp)
+            run_guarded(
+                lambda: rejected.write.mode("overwrite").options(**writer_options).parquet(
+                    str(rejected_temp)
+                )
             )
             if include_master:
-                (
-                    to_master(valid, source.service)
+                run_guarded(
+                    lambda: to_master(valid, source.service)
                     .write.mode("overwrite")
                     .options(**writer_options)
                     .parquet(str(master_temp))

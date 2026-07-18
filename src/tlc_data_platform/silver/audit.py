@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from tlc_data_platform.audit.silver_execution_repository import SilverExecutionRepository
 from tlc_data_platform.audit.silver_file_registry_repository import SilverFileRegistryRepository
@@ -14,3 +15,4 @@ class SilverAuditRepositories:
     registry: SilverFileRegistryRepository
     quality: SilverQualityRepository
     reconciliations: SilverReconciliationRepository
+    unified: Any | None = None

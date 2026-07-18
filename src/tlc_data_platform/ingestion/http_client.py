@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -48,52 +48,85 @@ class HttpClient:
         )
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
-        max_attempts = self._download.max_retries + 1
+        max_retries = int(kwargs.pop("max_retries_override", self._download.max_retries))
+        if max_retries < 0:
+            raise ValueError("max_retries_override no puede ser negativo")
+        max_attempts = max_retries + 1
         backoff = self._download.initial_backoff_seconds
         last_error: Exception | None = None
         retryable_status_codes = set(
             kwargs.pop("retryable_status_codes", self.RETRYABLE_STATUS_CODES)
         )
+        attempt_callback: Callable[[dict[str, Any]], None] | None = kwargs.pop(
+            "attempt_callback", None
+        )
+        timeout = kwargs.pop("timeout", self.timeout)
+        verify = kwargs.pop("verify", self._discovery.verify_tls)
 
         for attempt in range(1, max_attempts + 1):
             try:
                 response = self._session().request(
                     method,
                     url,
-                    timeout=kwargs.pop("timeout", self.timeout),
-                    verify=kwargs.pop("verify", self._discovery.verify_tls),
+                    timeout=timeout,
+                    verify=verify,
                     **kwargs,
                 )
-                if response.status_code not in retryable_status_codes:
+                retryable = response.status_code in retryable_status_codes
+                is_final = not retryable or attempt == max_attempts
+                delay = None if is_final else self._retry_delay(response, backoff)
+                if attempt_callback is not None:
+                    attempt_callback(
+                        {
+                            "attempt_number": attempt,
+                            "max_attempts": max_attempts,
+                            "status_code": response.status_code,
+                            "outcome": "SUCCESS" if not retryable else ("EXHAUSTED" if is_final else "RETRY"),
+                            "retry_delay_seconds": delay,
+                            "error_type": None,
+                            "error_message": None,
+                        }
+                    )
+                if is_final:
                     return response
-                if attempt == max_attempts:
-                    return response
-                delay = self._retry_delay(response, backoff)
                 LOGGER.warning(
                     "HTTP %s para %s; reintento %s/%s en %.1fs",
                     response.status_code,
                     url,
                     attempt,
-                    max_attempts - 1,
+                    max_retries,
                     delay,
                 )
                 response.close()
-                time.sleep(delay)
+                time.sleep(float(delay))
                 backoff = min(backoff * 2, self._download.max_backoff_seconds)
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
-                if attempt == max_attempts:
+                is_final = attempt == max_attempts
+                delay = None if is_final else min(backoff, self._download.max_backoff_seconds)
+                if attempt_callback is not None:
+                    attempt_callback(
+                        {
+                            "attempt_number": attempt,
+                            "max_attempts": max_attempts,
+                            "status_code": None,
+                            "outcome": "EXHAUSTED" if is_final else "RETRY",
+                            "retry_delay_seconds": delay,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc)[:2000],
+                        }
+                    )
+                if is_final:
                     raise
-                delay = min(backoff, self._download.max_backoff_seconds)
                 LOGGER.warning(
                     "Error temporal para %s; reintento %s/%s en %.1fs: %s",
                     url,
                     attempt,
-                    max_attempts - 1,
+                    max_retries,
                     delay,
                     exc,
                 )
-                time.sleep(delay)
+                time.sleep(float(delay))
                 backoff = min(backoff * 2, self._download.max_backoff_seconds)
 
         if last_error is not None:

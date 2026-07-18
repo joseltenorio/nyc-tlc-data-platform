@@ -38,10 +38,13 @@ quality:
 
 spark:
   app_name: nyc-tlc-data-platform-silver
-  master: local[*]
+  master: local[2]
   log_level: WARN
-  driver_memory: 6g
-  shuffle_partitions: 200
+  driver_memory: 3g
+  shuffle_partitions: 512
+  local_dir: data/tmp/spark/silver
+  max_temp_bytes: 32212254720
+  minimum_free_space_bytes: 21474836480
 
 references:
   bronze_root: data/bronze/reference

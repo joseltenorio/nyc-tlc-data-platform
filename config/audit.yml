@@ -1,0 +1,13 @@
+collections:
+  pipeline_runs: audit_pipeline_runs
+  dataset_events: audit_dataset_events
+  quality_events: audit_quality_events
+  coverage_snapshots: audit_coverage_snapshots
+  download_attempts: audit_download_attempts
+
+retention:
+  max_dashboard_documents: 20000
+
+coverage:
+  require_physical_parquet: true
+  treat_not_published_as_missing: false

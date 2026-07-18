@@ -17,6 +17,8 @@ COPY src ./src
 RUN pip install --no-cache-dir ".[dev]"
 
 COPY config ./config
+COPY dashboard ./dashboard
+COPY .streamlit ./.streamlit
 COPY tests ./tests
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

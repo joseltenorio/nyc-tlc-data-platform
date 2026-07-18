@@ -1,8 +1,11 @@
 #!/bin/sh
 set -eu
 
-if [ "${1:-}" = "pytest" ]; then
-  exec "$@"
-fi
-
-exec python -m tlc_data_platform "$@"
+case "${1:-}" in
+  pytest|streamlit|python|sh|bash)
+    exec "$@"
+    ;;
+  *)
+    exec python -m tlc_data_platform "$@"
+    ;;
+esac

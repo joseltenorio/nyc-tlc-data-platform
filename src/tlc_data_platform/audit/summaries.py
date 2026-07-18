@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from tlc_data_platform.audit.availability_repository import AvailabilityRepository
 from tlc_data_platform.audit.execution_repository import ExecutionRepository
@@ -14,3 +15,4 @@ class AuditRepositories:
     availability: AvailabilityRepository
     registry: FileRegistryRepository
     versions: FileVersionRepository
+    unified: Any | None = None

@@ -22,8 +22,6 @@ data/silver/**/*.crc
 
 # Temporary files and manifests
 data/tmp/**
-data/manifests/*.json
-data/manifests/silver/*.json
 
 # Preserve only directory markers
 !data/bronze/trip_records/.gitkeep
@@ -37,3 +35,19 @@ data/manifests/silver/*.json
 !data/manifests/
 !data/manifests/silver/
 !data/manifests/silver/.gitkeep
+
+# Gold runtime data
+data/gold/**/*.parquet
+data/gold/**/_SUCCESS
+data/gold/**/*.crc
+
+# Machine-learning outputs and persisted Spark models
+data/ml/**/*.parquet
+data/ml/**/_SUCCESS
+data/ml/**/*.crc
+data/models/**
+data/manifests/gold/*.json
+data/manifests/ml/*.json
+# Streamlit local secrets and caches
+.streamlit/secrets.toml
+dashboard/**/__pycache__/

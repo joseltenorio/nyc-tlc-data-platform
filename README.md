@@ -1,254 +1,181 @@
-# NYC TLC Data Platform — Bronze
+# NYC TLC Data Platform
 
-Implementación completa de la primera etapa del caso **NYC TLC Trip Record Data**. Esta entrega conserva los archivos Parquet oficiales sin transformarlos, registra su trazabilidad y deja el paquete preparado para incorporar posteriormente Silver, Gold, modelos predictivos y dashboards sin volver a reorganizar el repositorio.
+Plataforma local end-to-end para los registros de viajes de NYC TLC, implementada con **Python, PySpark, MongoDB, Docker Compose y Streamlit**.
 
-## Alcance real de esta entrega
-
-Incluye exclusivamente Bronze y sus componentes necesarios:
-
-- carga histórica predeterminada de **2019 a 2025**;
-- carga incremental de los archivos publicados de **2026**;
-- Yellow, Green, FHV y High Volume FHV;
-- `fhvhv/2019-01` registrado como `NOT_APPLICABLE`;
-- descubrimiento desde el HTML oficial y fallback determinista únicamente para periodos faltantes;
-- matriz completa `servicio × año × mes`;
-- descarga concurrente con ocho workers y máximo dos archivos HVFHV simultáneos;
-- archivos temporales `.part`, `fsync`, tamaño, firma Parquet y SHA-256;
-- una sola SparkSession para la validación posterior a las descargas;
-- metadata física obtenida sin ejecutar `count()` completo;
-- detección de evolución de esquema sin modificar el archivo;
-- publicación atómica y conservación de versiones oficiales anteriores;
-- auditoría normalizada en MongoDB;
-- manifiesto JSON por ejecución;
-- comandos `plan`, `historical`, `incremental` y `run`.
-
-No contiene transformaciones Silver, hechos o dimensiones Gold, modelos ML ni dashboards. Tampoco crea carpetas vacías para esas fases.
-
-## Estructura
+El flujo ejecutable es:
 
 ```text
-nyc-tlc-data-platform/
-├── config/
-│   ├── app.yml
-│   ├── tlc_sources.yml
-│   ├── bronze.yml
-│   └── schema_contracts.yml
-├── src/tlc_data_platform/
-│   ├── core/
-│   ├── ingestion/
-│   ├── bronze/
-│   ├── audit/
-│   ├── mongodb/
-│   ├── orchestration/
-│   └── cli/
-├── tests/
-│   ├── unit/
-│   └── integration/
-├── notebooks/
-├── docs/
-├── data/
-├── Dockerfile
-├── docker-compose.yml
-└── pyproject.toml
+NYC TLC → Bronze → Silver → Gold → ML → Streamlit
+                    └──────── auditoría, calidad, cobertura y manifiestos ────────┘
 ```
 
-## Flujo Bronze
+## Alcance de datos configurado
 
-```text
-Matriz esperada
-      ↓
-HTML oficial
-      ↓
-Fallback para periodos faltantes
-      ↓
-Probe remoto y plan de ejecución
-      ↓
-Reclamo atómico en MongoDB
-      ↓
-Descargas concurrentes a .part
-      ↓
-Validación física + PySpark
-      ↓
-Publicación atómica en Bronze
-      ↓
-Registro actual + historial de versiones
-      ↓
-Manifiesto y resumen de ejecución
-```
+La selección del proyecto está limitada explícitamente para evitar descargas accidentales de años o servicios no requeridos:
 
-Los Parquet no se renombran internamente, no se limpian, no se deduplican y no se reescriben. Bronze conserva el original publicado por TLC.
+| Servicio | Cobertura configurada |
+|---|---:|
+| Yellow | 2023–2025 + meses publicados de 2026 |
+| Green | 2023–2025 + meses publicados de 2026 |
+| FHV | 2023–2025 + meses publicados de 2026 |
+| HVFHV | 2023 únicamente |
 
-## Preparación
+Los periodos fuera de ese alcance quedan como `NOT_APPLICABLE`; no se descargan, no se transforman y no se contabilizan como pérdida de datos. Los meses futuros de 2026 quedan como `NOT_PUBLISHED_YET`, nunca como cero.
+
+## Correcciones de seguridad
+
+La ejecución local está deliberadamente priorizada por estabilidad, no por velocidad:
+
+- WSL obligatorio con límite configurable; valores recomendados: 8 GB de RAM, 4 CPU y 2 GB de swap.
+- Contenedor de procesamiento limitado a 5 GB y 2 CPU.
+- Spark usa `local[2]`, driver de 2–3 GB y 512 particiones de shuffle.
+- Bronze procesa una descarga a la vez y HVFHV nunca se paraleliza.
+- Silver procesa un archivo mensual por vez.
+- Gold procesa una partición mensual por vez y no mantiene simultáneamente hechos completos en caché.
+- Gold y ML publican primero en staging y sustituyen la salida anterior mediante promoción recuperable.
+- El spill de Spark se escribe en `data/tmp/spark`, visible en Windows, no oculto dentro de `docker_data.vhdx`.
+- Cada acción Spark se cancela cuando supera su límite temporal o amenaza la reserva mínima de disco.
+- El dashboard se detiene mientras corre Spark y vuelve a iniciarse incluso cuando una capa falla.
+
+## Primera preparación de WSL
+
+Cierra Docker Desktop y ejecuta una sola vez:
 
 ```powershell
-Copy-Item .env.example .env
-
-docker compose build
-docker compose up -d mongodb
+powershell -ExecutionPolicy Bypass -File .\scripts\configure-wsl.ps1
 ```
 
-## Plan antes de descargar
+Después abre Docker Desktop y espera a que el motor esté listo.
 
-El plan consulta disponibilidad y muestra cobertura, pendientes, tamaño remoto conocido y espacio libre. No marca archivos como procesados ni crea versiones.
+## Comando único
+
+Desde la raíz del proyecto:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-all.ps1
+```
+
+Este comando:
+
+1. valida límites WSL, Docker y espacio libre;
+2. construye la imagen;
+3. inicia MongoDB;
+4. ejecuta el histórico configurado;
+5. ejecuta los meses disponibles de 2026;
+6. limpia los temporales Spark;
+7. inicia Streamlit en `http://localhost:8501`.
+
+Modos disponibles:
+
+```powershell
+# Solo histórico y ML
+.\scripts\run-all.ps1 -Mode historical
+
+# Solo actualización 2026; no reentrena ML
+.\scripts\run-all.ps1 -Mode incremental
+
+# Todo, pero sin entrenamiento ML
+.\scripts\run-all.ps1 -Mode all -SkipML
+```
+
+El modo histórico/all exige por defecto 250 GB libres antes de empezar. El incremental exige 80 GB. El parámetro `-MinimumFreeGB` solo debería aumentarse.
+
+## Bronze
+
+Bronze conserva el Parquet oficial sin transformar y registra:
+
+- matriz completa de periodos esperados;
+- disponibilidad remota;
+- descarga a `.part` y publicación atómica;
+- firma Parquet, SHA-256, filas y metadata física;
+- hasta **cinco reintentos** por descarga, equivalentes a seis intentos totales;
+- estado, código HTTP, demora y error de cada intento;
+- versiones sustituidas e idempotencia por checksum.
+
+Comandos directos:
 
 ```powershell
 docker compose run --rm bronze plan
-```
-
-Plan pequeño:
-
-```powershell
-docker compose run --rm bronze plan `
-  --services yellow `
-  --start-year 2026 `
-  --end-year 2026 `
-  --months 1 2
-```
-
-## Carga histórica 2019–2025
-
-```powershell
 docker compose run --rm bronze historical
-```
-
-## Carga incremental 2026
-
-```powershell
 docker compose run --rm bronze incremental
 ```
 
-El pipeline solo procesa los archivos ya publicados. Los meses futuros quedan como `NOT_PUBLISHED_YET`.
+## Silver
 
-## Rango personalizado
+Silver consume únicamente Bronze `READY`, tipa y homologa columnas, enriquece zonas/bases, separa válidos y rechazados y publica `trips_master`.
+
+Por archivo comprueba:
+
+```text
+rows_read = rows_valid + rows_rejected
+```
+
+Las salidas mensuales se escriben en temporales y se promueven coordinadamente. Una salida solo se considera reutilizable cuando contiene Parquet y marcador `_SUCCESS`.
+
+## Gold
+
+Gold publica:
+
+- ocho dimensiones conformadas;
+- `fact_trip_activity`;
+- `fact_taxi_financial`;
+- `fact_hvfhv_operations`;
+- marts ejecutivos, geográficos, temporales, financieros y operacionales;
+- features para forecast, segmentación y wait-risk.
+
+Los hechos se escriben por `service_type/source_year/source_month`. Los marts y features leen solamente las particiones incluidas en el alcance del proyecto, por lo que archivos antiguos que pudieran quedar en disco no contaminan los dashboards.
+
+## Machine Learning
+
+Modelos disponibles:
+
+- pronóstico de demanda;
+- segmentación de zonas;
+- clasificación de riesgo de espera HVFHV.
+
+El modelo HVFHV usa cortes temporales dentro de 2023. Si un modelo no tiene datos suficientes, la corrida queda `PARTIAL_SUCCESS`, los demás modelos se conservan y el dashboard sigue disponible.
+
+## Auditoría unificada
+
+MongoDB mantiene las colecciones específicas de cada capa y un contrato común para Streamlit:
+
+```text
+audit_pipeline_runs
+audit_dataset_events
+audit_quality_events
+audit_coverage_snapshots
+audit_download_attempts
+```
+
+El dashboard de auditoría muestra:
+
+- corridas por capa y estado;
+- duración y relación padre/hijo del pipeline completo;
+- número de Parquet leídos/publicados por capa;
+- filas y bytes registrados;
+- periodos esperados, listos, no publicados, no aplicables y ausentes;
+- reglas de calidad y reconciliaciones;
+- errores consolidados;
+- intentos y reintentos HTTP.
+
+Los manifiestos JSON permanecen como respaldo cuando MongoDB no está disponible.
+
+## Rutas principales
+
+```text
+data/bronze/                    originales y referencias raw
+data/silver/                    datasets curados, rechazados y trips_master
+data/gold/                      dimensiones, hechos, marts y features
+data/ml/                        predicciones y métricas
+data/models/                    modelos Spark persistidos
+data/manifests/                 manifiestos por capa
+data/tmp/spark/                 spill temporal visible y limitado
+```
+
+## Validación del código
 
 ```powershell
-docker compose run --rm bronze run `
-  --services yellow green `
-  --start-year 2025 `
-  --end-year 2025 `
-  --months 1 2 `
-  --workers 4 `
-  --max-hvfhv-workers 2
+docker compose run --rm pipeline pytest
 ```
 
-## Dry run y reprocesamiento
-
-```powershell
-docker compose run --rm bronze incremental --dry-run
-```
-
-```powershell
-docker compose run --rm bronze run `
-  --services yellow `
-  --start-year 2026 `
-  --end-year 2026 `
-  --months 1 `
-  --force
-```
-
-Los argumentos de CLI sobrescriben la configuración en memoria; nunca editan los YAML.
-
-## Salidas
-
-Archivo vigente:
-
-```text
-data/bronze/trip_records/<service>/year=YYYY/month=MM/<service>_tripdata_YYYY-MM.parquet
-```
-
-Versiones sustituidas:
-
-```text
-data/bronze/versions/trip_records/<service>/year=YYYY/month=MM/
-```
-
-Manifiestos:
-
-```text
-data/manifests/<execution_id>.json
-```
-
-Colecciones MongoDB:
-
-```text
-pipeline_executions
-file_availability
-file_registry
-file_versions
-```
-
-## Estados
-
-Cobertura y disponibilidad:
-
-```text
-NOT_APPLICABLE
-NOT_PUBLISHED_YET
-AVAILABLE
-FAILED_TO_PROBE
-DISCOVERED
-```
-
-Procesamiento:
-
-```text
-PENDING
-DOWNLOADING
-DOWNLOADED
-VALIDATING
-READY
-SKIPPED_UNCHANGED
-SKIPPED_CLAIMED
-FAILED
-```
-
-Ejecución:
-
-```text
-RUNNING
-SUCCESS
-PARTIAL_SUCCESS
-FAILED
-DRY_RUN
-```
-
-## Validación Parquet
-
-Se comprueba:
-
-- firma inicial y final `PAR1`;
-- archivo no vacío y legible;
-- consistencia del nombre con servicio, año y mes;
-- campos requeridos y tipos esperados;
-- columnas opcionales ausentes;
-- columnas nuevas;
-- hash del esquema;
-- `num_rows`, `num_row_groups`, `num_columns`, `created_by` y codecs;
-- lectura de una fila de muestra con PySpark, sin un `count()` completo.
-
-Una columna nueva genera `schema_evolution_detected=true`, pero no invalida el archivo. Una columna requerida ausente sí produce `FAILED`.
-
-## Pruebas
-
-```powershell
-docker compose run --rm bronze pytest
-```
-
-Las pruebas usan mocks y Parquet pequeños; no descargan el histórico real.
-
-## Solución de problemas
-
-**MongoDB no está disponible:** ejecute `docker compose up -d mongodb` y revise `.env`.
-
-**Java no encontrado:** use la imagen Docker incluida. PySpark requiere Java y la imagen instala OpenJDK 17.
-
-**Espacio insuficiente:** ejecute `plan`, libere espacio o cambie las rutas de `config/bronze.yml`.
-
-**HTTP 429 o 5xx:** el cliente respeta `Retry-After` y aplica reintentos limitados con backoff.
-
-**Mes 2026 no publicado:** no es un fallo; se registra como `NOT_PUBLISHED_YET`.
-
-## Fuentes
-
-- Página oficial TLC: `https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page`
-- Patrón Parquet: `https://d37ci6vzurychx.cloudfront.net/trip-data/<service>_tripdata_YYYY-MM.parquet`
+La entrega fue validada además con compilación Python y análisis estático Ruff. Una prueba real completa con cientos de GB debe ejecutarse en tu equipo porque depende de tus Parquet y del motor Docker local.

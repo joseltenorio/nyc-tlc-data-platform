@@ -1,0 +1,75 @@
+storage:
+  gold_root: data/gold
+  temporary_root: data/tmp/gold
+  manifests_root: data/manifests/gold
+  dimensions_root: dimensions
+  facts_root: facts
+  marts_root: marts
+  features_root: ml_features
+
+execution:
+  parquet_compression: snappy
+  rebuild_dimensions: true
+  rebuild_marts: true
+  rebuild_ml_features: true
+  continue_on_error: false
+  process_partitions_sequentially: true
+  count_rows_before_write: false
+  build_marts_after_facts: true
+  build_ml_features_after_marts: true
+
+spark:
+  app_name: nyc-tlc-data-platform-gold
+  master: local[2]
+  log_level: WARN
+  driver_memory: 3g
+  shuffle_partitions: 512
+  local_dir: data/tmp/spark/gold
+  max_temp_bytes: 42949672960
+  minimum_free_space_bytes: 32212254720
+
+# Nombres físicos. Se mantienen centralizados para que Gold y Streamlit no
+# dependan de rutas escritas a mano en el código.
+datasets:
+  dimensions:
+    date: dim_date
+    time: dim_time
+    service: dim_service
+    zone: dim_zone
+    provider: dim_provider
+    payment_type: dim_payment_type
+    rate_code: dim_rate_code
+    trip_type: dim_trip_type
+  facts:
+    trip_activity: fact_trip_activity
+    taxi_financial: fact_taxi_financial
+    hvfhv_operations: fact_hvfhv_operations
+  marts:
+    executive_monthly: mart_executive_monthly
+    service_share: mart_service_share
+    daily_demand: mart_daily_demand
+    zone_demand: mart_zone_demand
+    od_routes: mart_od_routes
+    time_heatmap: mart_time_heatmap
+    financial_profile: mart_financial_profile
+    airport_activity: mart_airport_activity
+    profitability_drivers: mart_profitability_drivers
+    tip_behavior: mart_tip_behavior
+    operational_efficiency: mart_operational_efficiency
+    route_efficiency: mart_route_efficiency
+    zone_congestion: mart_zone_congestion
+    service_competition: mart_service_competition
+    hvfhv_service_quality: mart_hvfhv_service_quality
+    shared_ride_performance: mart_shared_ride_performance
+    accessibility_performance: mart_accessibility_performance
+  ml_features:
+    zone_hourly_demand: ml_zone_hourly_demand_features
+    zone_profiles: ml_zone_profile_features
+    hvfhv_wait_risk: ml_hvfhv_wait_features
+
+mongo_collections:
+  pipeline_executions: gold_pipeline_executions
+  dataset_registry: gold_dataset_registry
+  reconciliations: gold_reconciliations
+  quality_results: gold_quality_results
+  processing_attempts: processing_attempts

@@ -1,307 +1,163 @@
-# Informe de implementación — Bronze + Silver
+# Informe de corrección: seguridad, compatibilidad, auditoría y calidad
 
-## Resultado
+## Objetivo
 
-El repositorio `nyc-tlc-data-platform` conserva la implementación Bronze existente y añade una capa Silver completa para Yellow, Green, FHV y HVFHV. La nueva capa procesa únicamente archivos Bronze vigentes con estado `READY`, separa registros aceptados y rechazados, enriquece zonas y bases, genera un contrato transversal `trips_master` y registra calidad y reconciliación en MongoDB.
+Corregir la plataforma completa para que el flujo Bronze → Silver → Gold → ML → Streamlit sea coherente con el alcance 2023–2025 + 2026, no vuelva a generar crecimiento descontrolado dentro del disco virtual de Docker y exponga información operativa útil para los dashboards.
 
-No se añadieron todavía tablas Gold, modelos predictivos ni dashboards.
+## Alcance de datos aplicado
 
-## Principios conservados de Bronze
+- Yellow, Green y FHV: enero de 2023 a diciembre de 2026; en 2026 solo se procesan archivos ya publicados.
+- HVFHV: enero a diciembre de 2023.
+- Cualquier periodo fuera de esas ventanas se registra como `NOT_APPLICABLE`.
+- El alcance se aplica en Bronze, Silver y Gold; no depende únicamente de filtros visuales del dashboard.
 
-No se reemplazó la lógica ya implementada de:
-
-- descubrimiento HTML y fallback determinista;
-- matriz de periodos 2019–2026;
-- tratamiento de `fhvhv/2019-01` como `NOT_APPLICABLE`;
-- descarga a `.part`, checksum y validación Parquet;
-- publicación atómica e historial de versiones;
-- claims recuperables;
-- auditoría y manifiestos Bronze;
-- comandos `plan`, `historical`, `incremental` y `run`.
-
-Los 15 tests de integración Bronze existentes continúan aprobando.
-
-## Archivos principales creados
-
-### Configuración
+La carga histórica predeterminada contiene 120 particiones aplicables:
 
 ```text
-config/silver.yml
+Yellow  36
+Green   36
+FHV     36
+HVFHV   12
+Total  120
 ```
 
-### Código Silver
+La selección incremental 2026 contiene 36 periodos aplicables antes de descontar meses todavía no publicados.
+
+## Corrección del crecimiento de Docker/WSL
+
+La causa principal era la combinación de DataFrames Gold completos persistidos, conteos repetidos, reconstrucción global y spill almacenado dentro del filesystem del contenedor.
+
+Se implementó:
+
+- procesamiento Gold secuencial por partición Silver;
+- eliminación de cachés globales de hechos;
+- lectura con poda de columnas para proveedores;
+- lectura analítica limitada a las particiones configuradas;
+- `local[2]`, driver de 3 GB y 512 particiones para Silver/Gold/ML;
+- contenedor de 5 GB y 2 CPU;
+- directorios Spark dedicados bajo `data/tmp/spark/<layer>/run-*`;
+- monitor de espacio temporal y espacio libre;
+- cancelación de jobs al superar límites;
+- limpieza en cierre normal y en error;
+- detención del dashboard durante las fases Spark;
+- validación obligatoria de `.wslconfig` antes del comando completo.
+
+## Publicación y recuperación
+
+Silver, Gold y ML verifican `_SUCCESS` y archivos Parquet antes de publicar.
+
+Gold y ML usan el patrón:
 
 ```text
-src/tlc_data_platform/silver/
-├── __init__.py
-├── audit.py
-├── enrichment.py
-├── manifest.py
-├── master.py
-├── models.py
-├── pipeline.py
-├── references.py
-├── source_catalog.py
-├── spark.py
-├── storage.py
-└── transformers/
-    ├── __init__.py
-    ├── common.py
-    ├── taxi.py
-    ├── yellow.py
-    ├── green.py
-    ├── fhv.py
-    └── fhvhv.py
+staging → validar → renombrar salida previa → promover → eliminar respaldo
 ```
 
-### Auditoría e índices
+Si la promoción falla, se restaura la salida anterior. También se recuperan respaldos `.previous-*` abandonados por interrupciones anteriores.
+
+## Descargas Bronze
+
+`max_retries: 5` significa:
 
 ```text
-src/tlc_data_platform/audit/silver_execution_repository.py
-src/tlc_data_platform/audit/silver_file_registry_repository.py
-src/tlc_data_platform/audit/silver_quality_repository.py
-src/tlc_data_platform/audit/silver_reconciliation_repository.py
-src/tlc_data_platform/mongodb/silver_index_manager.py
+1 intento inicial + hasta 5 reintentos = 6 intentos totales
 ```
 
-### Orquestación
+Se reintenta la transferencia completa para HTTP 202, 403, 429, 5xx y fallos de timeout/conexión/streaming. Cada intento elimina el `.part` anterior y reinicia la transferencia para evitar archivos concatenados o truncados.
 
-```text
-src/tlc_data_platform/orchestration/silver_pipeline.py
-src/tlc_data_platform/orchestration/medallion_pipeline.py
-```
+Cada intento registra:
 
-### Pruebas
+- servicio, año y mes;
+- URL;
+- número de intento y máximo;
+- código HTTP;
+- `SUCCESS`, `RETRY` o `EXHAUSTED`;
+- demora antes del siguiente intento;
+- tipo y mensaje de error.
 
-```text
-tests/unit/test_silver_manifest.py
-tests/unit/test_silver_registry.py
-tests/unit/test_silver_settings.py
-tests/unit/test_silver_source_catalog.py
-tests/unit/test_silver_storage.py
-tests/integration/test_silver_transformers.py
-tests/integration/test_silver_references.py
-tests/integration/test_silver_pipeline.py
-```
+## Auditoría unificada
 
-### Documentación y notebooks
+Se añadieron colecciones estables consumidas por Streamlit:
 
-```text
-docs/silver-architecture.md
-docs/silver-data-quality.md
-docs/silver-data-dictionary.md
-docs/silver-execution-guide.md
-notebooks/04_silver_plan.ipynb
-notebooks/05_execute_historical_silver.ipynb
-notebooks/06_execute_incremental_silver.ipynb
-notebooks/07_refresh_silver_references.ipynb
-```
+| Colección | Contenido |
+|---|---|
+| `audit_pipeline_runs` | corridas Bronze, Silver, Gold, ML y padre `platform` |
+| `audit_dataset_events` | Parquet de entrada/salida, filas, bytes, ruta y estado |
+| `audit_quality_events` | reglas de validez, completitud, reconciliación y confiabilidad |
+| `audit_coverage_snapshots` | periodos/datasets esperados, listos y ausentes |
+| `audit_download_attempts` | intentos y reintentos de descarga Bronze |
 
-## Archivos principales modificados
+Las corridas hijas se enlazan mediante `parent_execution_id` a la corrida de plataforma.
 
-```text
-README.md
-IMPLEMENTATION_REPORT.md
-pyproject.toml
-Dockerfile
-docker-compose.yml
-.gitignore
-.dockerignore
-config/app.yml
-src/tlc_data_platform/core/settings.py
-src/tlc_data_platform/core/exceptions.py
-src/tlc_data_platform/cli/main.py
-src/tlc_data_platform/audit/summaries.py
-docs/audit-model.md
-docs/bronze-architecture.md
-docs/execution-guide.md
-notebooks/00_environment_validation.ipynb
-tests/conftest.py
-tests/unit/test_cli.py
-```
+## Calidad por capa
 
-No se eliminaron módulos funcionales de Bronze.
+### Bronze
 
-## Funcionalidad Silver implementada
+- contrato de esquema y tipos;
+- archivo no vacío;
+- firma y metadata Parquet;
+- presencia física del archivo publicado;
+- análisis de todos los periodos esperados;
+- distinción entre ausente, no publicado, diferido y no aplicable.
 
-### Selección de fuentes
+### Silver
 
-- Consulta `file_registry` Bronze.
-- Exige `status=READY` por defecto.
-- Verifica existencia física del Parquet.
-- Conserva SHA-256, ejecución Bronze y número de filas de metadata.
-- Distingue `BRONZE_READY`, `BRONZE_NOT_READY` y `NOT_APPLICABLE` en el plan.
+- reglas `ERROR` y `WARNING` por servicio;
+- deduplicación determinista;
+- rechazados preservados;
+- reconciliación `read = valid + rejected`;
+- comparación con filas Bronze cuando hay metadata;
+- validación de salidas idempotentes;
+- cobertura de todas las particiones aplicables.
 
-### Transformaciones por servicio
+### Gold
 
-Yellow y Green:
+- reconciliación Silver `trips_master` → `fact_trip_activity` por periodo;
+- presencia física de dimensiones, hechos, marts y features;
+- métricas Parquet después de publicar;
+- cobertura de outputs esperados;
+- exclusión de periodos fuera del alcance.
 
-- tipado y homologación de vendor, tarifa, pago y banderas;
-- timestamps locales `timestamp_ntz`;
-- pasajeros, distancia y componentes financieros;
-- duración, velocidad, tarifa por milla, porcentaje de propina e ingreso por minuto;
-- campos específicos Green (`trip_type`, `ehail_fee`).
+### ML
 
-FHV:
+- features de entrada registradas;
+- splits temporalmente no vacíos;
+- métricas registradas;
+- outputs físicos por modelo;
+- cobertura de modelos solicitados;
+- continuidad con `PARTIAL_SUCCESS` cuando un modelo aislado falla.
 
-- bases despachadora y afiliada;
-- fechas y zonas homologadas;
-- normalización de `SR_Flag`;
-- duración y viaje aeroportuario.
+## Dashboard de auditoría
 
-HVFHV:
+La página `10_Auditoria_Pipeline.py` presenta:
 
-- solicitud, llegada, pickup y dropoff;
-- millas, tiempo informado y componentes financieros;
-- shared ride, Access-A-Ride y WAV;
-- espera del conductor y solicitud–pickup;
-- mapeo de licenciatarios HVFHS conocido y advertencia ante códigos nuevos.
+- KPIs de corridas, tasa operativa, Parquet, reintentos, reglas fallidas y ausencias;
+- Parquet y bytes por capa/tipo/estado;
+- cobertura esperada;
+- calidad y reconciliaciones;
+- errores e intentos HTTP;
+- historial de corridas.
 
-### Calidad
+Usa MongoDB y combina manifiestos JSON como fallback.
 
-- reglas `ERROR` y `WARNING` por fila;
-- arrays de códigos de calidad;
-- deduplicación determinista por SHA-256;
-- registros rechazados preservados físicamente;
-- registros con advertencias conservados en Silver curado;
-- conteos de reglas en `silver_quality_results`.
+## Orquestación completa
 
-### Referencias
-
-- descarga de Taxi Zone Lookup y Current Bases;
-- validación de CSV y cabeceras;
-- copia raw inmutable en Bronze por SHA-256;
-- normalización a Parquet Silver;
-- joins broadcast de pickup/dropoff y bases;
-- faltantes de zona como error;
-- bases históricas ausentes del catálogo vigente como advertencia.
-
-### Salidas
-
-```text
-data/silver/yellow_trips/
-data/silver/green_trips/
-data/silver/fhv_trips/
-data/silver/hvfhv_trips/
-data/silver/rejected_records/
-data/silver/trips_master/
-data/silver/taxi_zones/
-data/silver/base_lookup/
-```
-
-### Reconciliación
-
-Por archivo se comprueba:
-
-```text
-rows_read = rows_valid + rows_rejected
-```
-
-Cuando Bronze contiene `parquet_num_rows`, también se compara contra la lectura Spark.
-
-### Idempotencia y publicación
-
-- claim atómico por servicio, año y mes;
-- recuperación de claims vencidos, huérfanos o de ejecuciones finalizadas;
-- omisión por SHA Bronze sin cambios y salidas presentes;
-- escritura en temporales;
-- promoción recuperable de curated, rejected y master;
-- `--force` para reprocesamiento explícito.
-
-## Comandos añadidos
-
-```text
-silver-plan
-silver-historical
-silver-incremental
-silver-run
-silver-references
-medallion-historical
-medallion-incremental
-medallion-run
-```
-
-## Validaciones ejecutadas
-
-### Compilación y configuración
-
-```text
-python -m compileall -q src tests
-Carga válida de 5 archivos YAML
-Validación JSON de 8 notebooks
-python -m tlc_data_platform --help
-```
-
-### Pruebas
-
-Se recolectaron **94 pruebas**:
-
-```text
-72 unitarias
-15 integración Bronze
-7 integración Silver con Spark
-```
-
-Resultados ejecutados:
-
-```text
-72/72 pruebas unitarias aprobadas
-15/15 pruebas de integración Bronze aprobadas
-5/5 pruebas de transformadores Silver aprobadas
-1/1 prueba de referencias Silver aprobada
-1/1 prueba end-to-end Silver aprobada
-```
-
-Total validado por grupos:
-
-```text
-94 aprobadas
-0 fallidas
-```
-
-La prueba end-to-end Silver creó Parquet pequeños, escribió curated/rejected/master y verificó la reconciliación de filas.
-
-## Limitaciones de validación del entorno
-
-- No se descargó el histórico real 2019–2025 ni los meses reales de 2026.
-- No se consultaron referencias oficiales durante los tests; se utilizaron respuestas controladas.
-- No se levantó MongoDB real; repositorios, claims e índices se validaron con dobles.
-- No se construyó la imagen Docker porque el entorno no dispone del comando/daemon Docker.
-- El intérprete disponible para la validación fue Python 3.13, fuera del rango soportado del proyecto. Por estabilidad de workers PySpark, los módulos Spark se ejecutaron en procesos separados. El proyecto exige Python 3.11 o 3.12 y la imagen Docker usa Python 3.12.
-- No se realizaron commits, pushes ni ramas.
-
-## Comandos de ejecución
-
-Preparación:
+Comando principal:
 
 ```powershell
-Copy-Item .env.example .env
-docker compose build
-docker compose up -d mongodb
+powershell -ExecutionPolicy Bypass -File .\scripts\run-all.ps1
 ```
 
-Bronze + Silver histórico:
+El dashboard se inicia al terminar y también después de un fallo de una capa, permitiendo revisar la auditoría. El comando conserva un código de error cuando la plataforma falló.
 
-```powershell
-docker compose run --rm pipeline medallion-historical
-```
+## Validaciones realizadas
 
-Bronze + Silver incremental:
+- carga de todos los YAML;
+- compilación de `src`, `dashboard` y `tests`;
+- análisis estático Ruff sin hallazgos;
+- suite unitaria/integración ligera completa aprobada;
+- pruebas específicas del alcance 120/36;
+- pruebas de cinco reintentos;
+- pruebas de recuperación/publicación Silver;
+- pruebas de rutas de partición Gold compatibles con Spark.
 
-```powershell
-docker compose run --rm pipeline medallion-incremental
-```
-
-Solo Silver:
-
-```powershell
-docker compose run --rm silver silver-plan
-docker compose run --rm silver silver-references
-docker compose run --rm silver silver-historical
-```
-
-Pruebas:
-
-```powershell
-docker compose run --rm pipeline pytest
-```
+No se ejecutó una carga real de cientos de GB dentro del entorno de generación de esta entrega. La validación end-to-end con tus datos debe realizarse localmente y queda protegida por los límites de memoria, disco y staging descritos.

@@ -1,15 +1,13 @@
 from dataclasses import replace
-from datetime import datetime
 
 import pytest
 
 pyspark = pytest.importorskip("pyspark")
-from pyspark.sql import SparkSession
 
-from tlc_data_platform.core.settings import resolve_silver_selection
-from tlc_data_platform.silver.audit import SilverAuditRepositories
-from tlc_data_platform.silver.models import SilverPeriodState, SilverSourceFile
-from tlc_data_platform.silver.pipeline import SilverPipeline
+from tlc_data_platform.core.settings import resolve_silver_selection  # noqa: E402
+from tlc_data_platform.silver.audit import SilverAuditRepositories  # noqa: E402
+from tlc_data_platform.silver.models import SilverPeriodState, SilverSourceFile  # noqa: E402
+from tlc_data_platform.silver.pipeline import SilverPipeline  # noqa: E402
 
 
 class StaticSparkProvider:

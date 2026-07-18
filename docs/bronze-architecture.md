@@ -1,24 +1,22 @@
 # Arquitectura Bronze
 
-Bronze es la zona inmutable de aterrizaje del repositorio Bronze + Silver. Conserva cada Parquet oficial tal como fue descargado y mantiene la metadata técnica fuera del archivo.
+Bronze conserva cada Parquet oficial sin transformar y mantiene metadata técnica fuera del archivo.
 
 ```text
-TLC → discovery → availability matrix → concurrent download → validation → atomic publish
-                                                                    ↓
-                                                        MongoDB + manifest JSON
-                                                                    ↓
-                                                              Silver
+alcance esperado → discovery HTML/fallback → disponibilidad → descarga/reintentos
+        → validación física y esquema → publicación atómica → MongoDB + manifiesto
 ```
 
-## Separación de responsabilidades
+## Alcance
 
-- `core`: configuración, errores, logging y Spark compartible.
-- `ingestion`: red, descubrimiento, descarga, checksum y validación.
-- `bronze`: modelos, almacenamiento, manifiesto y coordinación Bronze.
-- `silver`: transformación, calidad, referencias y contrato conformado.
-- `audit`: repositorios de ejecuciones, disponibilidad, registros y reconciliaciones.
-- `mongodb`: conexión e índices.
-- `orchestration`: puntos de entrada reutilizables por CLI o notebooks.
-- `cli`: comandos Bronze, Silver y Medallion.
+La matriz se genera con una ventana por servicio. Los periodos fuera del proyecto quedan `NOT_APPLICABLE`; los meses todavía no publicados quedan `NOT_PUBLISHED_YET`.
 
-Bronze no renombra columnas, no convierte tipos, no elimina filas y no reescribe el Parquet oficial. Esas responsabilidades comienzan en Silver.
+## Descarga
+
+- un worker y un máximo de un HVFHV simultáneo;
+- `.part` nuevo por intento;
+- un intento inicial y cinco reintentos;
+- `fsync`, tamaño, firma `PAR1`, SHA-256 y validación PySpark;
+- publicación atómica e historial de versiones.
+
+Bronze no renombra columnas, convierte tipos, elimina filas ni reescribe el Parquet oficial.

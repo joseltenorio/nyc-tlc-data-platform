@@ -12,3 +12,9 @@ def test_cli_supports_required_commands():
     assert parser.parse_args(["silver-historical"]).command == "silver-historical"
     assert parser.parse_args(["silver-references"]).command == "silver-references"
     assert parser.parse_args(["medallion-incremental"]).command == "medallion-incremental"
+    assert parser.parse_args(["gold-plan"]).command == "gold-plan"
+    assert parser.parse_args(["gold-historical"]).command == "gold-historical"
+    assert parser.parse_args(["ml-plan", "--models", "forecast"]).models == ["forecast"]
+    assert parser.parse_args(["ml-train", "--models", "wait-risk"]).models == ["wait-risk"]
+    platform = parser.parse_args(["platform-incremental", "--train-ml"])
+    assert platform.train_ml is True

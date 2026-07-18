@@ -8,7 +8,7 @@ source:
     - d37ci6vzurychx.cloudfront.net
 
 period:
-  historical_start_year: 2019
+  historical_start_year: 2023
   historical_end_year: 2025
   incremental_year: 2026
   months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -20,26 +20,50 @@ services:
     available_from:
       year: 2019
       month: 1
+    scope_from:
+      year: 2023
+      month: 1
+    scope_to:
+      year: 2026
+      month: 12
   green:
     enabled: true
     file_prefix: green_tripdata
     available_from:
       year: 2019
       month: 1
+    scope_from:
+      year: 2023
+      month: 1
+    scope_to:
+      year: 2026
+      month: 12
   fhv:
     enabled: true
     file_prefix: fhv_tripdata
     available_from:
       year: 2019
       month: 1
+    scope_from:
+      year: 2023
+      month: 1
+    scope_to:
+      year: 2026
+      month: 12
   fhvhv:
     enabled: true
     file_prefix: fhvhv_tripdata
     available_from:
       year: 2019
       month: 2
+    scope_from:
+      year: 2023
+      month: 1
+    scope_to:
+      year: 2023
+      month: 12
 
 discovery:
   strategy: html_with_deterministic_fallback
   verify_tls: true
-  user_agent: nyc-tlc-data-platform/1.1
+  user_agent: nyc-tlc-data-platform/3.0

@@ -23,3 +23,6 @@ class SilverTransformationError(TLCPlatformError):
 
 class SilverReconciliationError(TLCPlatformError):
     """Raised when Bronze and Silver row counts cannot be reconciled."""
+
+class SparkTemporarySpaceError(RuntimeError):
+    """Raised when Spark temporary storage reaches the configured safety limit."""

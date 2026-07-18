@@ -2,7 +2,7 @@
 
 ## Propósito
 
-Silver convierte los Parquet originales de Bronze en datasets tipados, homologados y trazables. La capa conserva una salida por servicio, separa los registros rechazados y publica un contrato transversal `trips_master` que será la entrada del futuro modelo dimensional Gold.
+Silver convierte los Parquet originales de Bronze en datasets tipados, homologados y trazables. La capa conserva una salida por servicio, separa los registros rechazados y publica un contrato transversal `trips_master` que es la entrada del modelo dimensional Gold.
 
 Silver no reemplaza ni modifica Bronze. Cada periodo se procesa a partir del archivo vigente registrado como `READY` en `file_registry`.
 
@@ -124,4 +124,4 @@ data/silver/base_lookup/
 
 ## Preparación para Gold
 
-`trips_master` mantiene únicamente atributos compatibles o útiles entre servicios. Las variables exclusivas permanecen en los datasets Silver por servicio. Esta decisión permite construir después una constelación de hechos sin forzar todos los campos especializados dentro de una sola tabla analítica.
+`trips_master` mantiene únicamente atributos compatibles o útiles entre servicios. Las variables exclusivas permanecen en los datasets Silver por servicio. Esta decisión alimenta la constelación de hechos Gold sin forzar todos los campos especializados dentro de una sola tabla analítica.
