@@ -8,6 +8,7 @@ paths:
   gold_root: data/gold
   ml_root: data/ml
   manifests_root: data/manifests
+  audit_root: data/audit
 
 analysis_scope:
   start_year: 2023
@@ -35,6 +36,7 @@ status_labels:
   FAILED: Fallido
   RUNNING: En ejecución
   NO_INPUT: Sin entrada
+  NO_SCOPE: Sin alcance aplicable
   BLOCKED: Bloqueado
   READY: Listo
   SKIPPED: Omitido
@@ -46,6 +48,7 @@ status_colors:
   FAILED: "#F07867"
   RUNNING: "#6E9FD0"
   NO_INPUT: "#A7A7B3"
+  NO_SCOPE: "#A7A7B3"
   BLOCKED: "#A7A7B3"
   READY: "#6FCB83"
   SKIPPED: "#A7A7B3"

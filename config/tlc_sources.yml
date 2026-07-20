@@ -60,7 +60,7 @@ services:
       year: 2023
       month: 1
     scope_to:
-      year: 2023
+      year: 2026
       month: 12
 
 discovery:

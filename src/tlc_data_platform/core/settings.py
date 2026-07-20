@@ -368,8 +368,23 @@ class AuditCollectionsConfig:
 
 
 @dataclass(frozen=True)
+class AuditFilesystemConfig:
+    enabled: bool
+    root: Path
+    pipeline_runs_file: str
+    dataset_events_file: str
+    quality_events_file: str
+    coverage_snapshots_file: str
+    download_attempts_file: str
+    inventory_snapshots_file: str
+    inventory_current_file: str
+    layer_roots: dict[str, Path]
+
+
+@dataclass(frozen=True)
 class AuditConfig:
     collections: AuditCollectionsConfig
+    filesystem: AuditFilesystemConfig
     max_dashboard_documents: int
     require_physical_parquet: bool
     treat_not_published_as_missing: bool
@@ -500,6 +515,10 @@ def load_config(config_dir: str | Path = "config") -> AppConfig:
     wait_risk_raw = _require(ml_raw, "wait_risk", "ml.yml")
     ml_collections_raw = _require(ml_raw, "mongo_collections", "ml.yml")
     audit_collections_raw = _require(audit_raw, "collections", "audit.yml")
+    audit_filesystem_raw = _require(audit_raw, "filesystem", "audit.yml")
+    audit_layer_roots_raw = _require(
+        audit_filesystem_raw, "layer_roots", "audit.filesystem"
+    )
     audit_retention_raw = _require(audit_raw, "retention", "audit.yml")
     audit_coverage_raw = _require(audit_raw, "coverage", "audit.yml")
 
@@ -789,6 +808,21 @@ def load_config(config_dir: str | Path = "config") -> AppConfig:
                 quality_events=str(_require(audit_collections_raw, "quality_events", "audit.collections")),
                 coverage_snapshots=str(_require(audit_collections_raw, "coverage_snapshots", "audit.collections")),
                 download_attempts=str(_require(audit_collections_raw, "download_attempts", "audit.collections")),
+            ),
+            filesystem=AuditFilesystemConfig(
+                enabled=bool(_require(audit_filesystem_raw, "enabled", "audit.filesystem")),
+                root=Path(_require(audit_filesystem_raw, "root", "audit.filesystem")),
+                pipeline_runs_file=str(_require(audit_filesystem_raw, "pipeline_runs_file", "audit.filesystem")),
+                dataset_events_file=str(_require(audit_filesystem_raw, "dataset_events_file", "audit.filesystem")),
+                quality_events_file=str(_require(audit_filesystem_raw, "quality_events_file", "audit.filesystem")),
+                coverage_snapshots_file=str(_require(audit_filesystem_raw, "coverage_snapshots_file", "audit.filesystem")),
+                download_attempts_file=str(_require(audit_filesystem_raw, "download_attempts_file", "audit.filesystem")),
+                inventory_snapshots_file=str(_require(audit_filesystem_raw, "inventory_snapshots_file", "audit.filesystem")),
+                inventory_current_file=str(_require(audit_filesystem_raw, "inventory_current_file", "audit.filesystem")),
+                layer_roots={
+                    str(layer).lower(): Path(path)
+                    for layer, path in audit_layer_roots_raw.items()
+                },
             ),
             max_dashboard_documents=int(_require(audit_retention_raw, "max_dashboard_documents", "audit.retention")),
             require_physical_parquet=bool(_require(audit_coverage_raw, "require_physical_parquet", "audit.coverage")),

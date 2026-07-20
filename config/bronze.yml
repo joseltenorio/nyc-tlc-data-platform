@@ -2,7 +2,7 @@ storage:
   bronze_root: data/bronze/trip_records
   versions_root: data/bronze/versions/trip_records
   temporary_root: data/tmp
-  manifests_root: data/manifests
+  manifests_root: data/manifests/bronze
   minimum_free_space_bytes: 1073741824
 
 download:

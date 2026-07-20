@@ -184,7 +184,7 @@ class GoldPipeline:
                 started_at,
                 selection,
                 partitions,
-                source_metrics.rows or 0,
+                source_metrics.rows,
                 results,
                 warnings,
             )
@@ -356,7 +356,9 @@ class GoldPipeline:
         activity_metrics = parquet_metrics(activity_path)
         source_rows = input_metrics.rows
         target_rows = activity_metrics.rows
-        matched = source_rows is None or target_rows == source_rows
+        measurable = source_rows is not None and target_rows is not None
+        matched = measurable and target_rows == source_rows
+        difference = target_rows - source_rows if measurable else None
         audit.reconciliations.insert_one(
             {
                 "execution_id": execution_id,
@@ -368,7 +370,7 @@ class GoldPipeline:
                 "target_dataset": "gold.fact_trip_activity",
                 "source_rows": source_rows,
                 "target_rows": target_rows,
-                "difference": None if source_rows is None or target_rows is None else target_rows - source_rows,
+                "difference": difference,
                 "status": "MATCHED" if matched else "FAILED",
                 "checked_at": utc_now(),
             }
@@ -384,8 +386,21 @@ class GoldPipeline:
                 status="PASSED" if matched else "FAILED",
                 expected=source_rows,
                 actual=target_rows,
-                failed_rows=0 if matched else abs((target_rows or 0) - (source_rows or 0)),
-                context={"service": source.service, "year": source.year, "month": source.month},
+                failed_rows=(
+                    0
+                    if matched
+                    else (abs(difference) if difference is not None else None)
+                ),
+                message=(
+                    None
+                    if measurable
+                    else "No fue posible medir filas de origen y destino para reconciliar."
+                ),
+                context={
+                    "service": source.service,
+                    "year": source.year,
+                    "month": source.month,
+                },
             )
         if not matched:
             raise ValueError(
@@ -653,7 +668,7 @@ class GoldPipeline:
         started_at: Any,
         selection: RunSelection,
         partitions: list[GoldSourcePartition],
-        source_rows: int,
+        source_rows: int | None,
         results: list[GoldDatasetResult],
         warnings: list[str],
     ) -> GoldExecutionSummary:

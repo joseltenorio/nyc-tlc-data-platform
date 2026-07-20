@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -119,3 +120,93 @@ def test_coverage_excludes_not_published_when_configured(app_config):
     assert document["status"] == "COMPLETE"
     assert document["coverage_rate"] == 1.0
     assert document["not_published_count"] == 1
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_unified_audit_writes_mongo_and_jsonl_with_real_metrics(app_config):
+    database = FakeDatabase()
+    audit = UnifiedAuditRepository(database, app_config.audit)
+
+    audit.start_run("run-jsonl", layer="bronze", execution_type="historical")
+    audit.record_dataset(
+        "run-jsonl",
+        layer="bronze",
+        dataset_name="yellow-2025-01",
+        dataset_type="trip_records",
+        operation="publish",
+        status="READY",
+        path="data/bronze/trip_records/yellow/year=2025/month=01",
+        parquet_files=1,
+        rows=100,
+        bytes_on_disk=2048,
+    )
+    audit.record_download_attempt(
+        "run-jsonl",
+        service="yellow",
+        year=2025,
+        month=1,
+        url="https://example.test/yellow.parquet",
+        attempt_number=1,
+        max_attempts=6,
+        outcome="SUCCESS",
+        duration_seconds=2.0,
+        bytes_downloaded=2048,
+        throughput_bytes_per_second=1024.0,
+    )
+    audit.finish_run(
+        "run-jsonl",
+        status="SUCCESS",
+        metrics={"download_seconds": 2.0, "error_rate": 0.0},
+    )
+
+    root = app_config.audit.filesystem.root
+    run_events = read_jsonl(root / "bronze" / "pipeline_runs.jsonl")
+    datasets = read_jsonl(root / "bronze" / "dataset_events.jsonl")
+    attempts = read_jsonl(root / "bronze" / "download_attempts.jsonl")
+
+    assert [event["event_action"] for event in run_events] == ["START", "FINISH"]
+    assert datasets[0]["parquet_files"] == 1
+    assert datasets[0]["rows"] == 100
+    assert attempts[0]["duration_seconds"] == 2.0
+    assert attempts[0]["throughput_bytes_per_second"] == 1024.0
+    assert database[app_config.audit.collections.dataset_events].documents[0]["rows"] == 100
+
+
+def test_link_parent_preserves_child_layer_across_repository_instances(app_config):
+    database = FakeDatabase()
+    child_repository = UnifiedAuditRepository(database, app_config.audit)
+    child_repository.start_run("child-1", layer="silver", execution_type="run")
+
+    orchestrator_repository = UnifiedAuditRepository(database, app_config.audit)
+    orchestrator_repository.link_parent("child-1", "platform-1")
+
+    root = app_config.audit.filesystem.root
+    records = read_jsonl(root / "silver" / "pipeline_runs.jsonl")
+    assert records[-1]["event_action"] == "LINK_PARENT"
+    assert records[-1]["layer"] == "silver"
+    assert not (root / "unknown" / "pipeline_runs.jsonl").exists()
+
+
+def test_coverage_without_applicable_scope_is_not_reported_as_one_hundred_percent(
+    app_config,
+):
+    database = FakeDatabase()
+    repository = UnifiedAuditRepository(database, app_config.audit)
+
+    repository.record_coverage(
+        "run-no-scope",
+        layer="gold",
+        expected_count=2,
+        available_count=0,
+        ready_count=0,
+        missing=[],
+        not_applicable_count=2,
+    )
+
+    collection = database[app_config.audit.collections.coverage_snapshots]
+    document = collection.documents[0]
+    assert document["status"] == "NO_SCOPE"
+    assert document["coverage_rate"] is None

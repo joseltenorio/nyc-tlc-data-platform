@@ -34,6 +34,7 @@ STATUS_COLORS = {
     "FAILED": "#F07867",
     "RUNNING": "#6E9FD0",
     "NO_INPUT": "#A7A7B3",
+    "NO_SCOPE": "#A7A7B3",
     "BLOCKED": "#A7A7B3",
     "READY": "#6FCB83",
     "SKIPPED": "#A7A7B3",

@@ -366,6 +366,55 @@ def test_partial_success_when_one_download_fails(app_config):
     assert summary.failed_files == 1
 
 
+
+def test_claimed_period_prevents_false_success(app_config):
+    audit = fake_audit()
+    blocked = candidate(1)
+    available = candidate(2)
+    audit.registry.claims.add(audit.registry._key(blocked))
+    pipeline, _, downloader, _ = make_pipeline(
+        app_config,
+        [blocked, available],
+        audit=audit,
+    )
+    selection = resolve_selection(
+        app_config,
+        mode="incremental",
+        services=["yellow"],
+        months=[1, 2],
+    )
+
+    summary = pipeline.run(selection, execution_type="incremental")
+
+    assert summary.status == "PARTIAL_SUCCESS"
+    assert summary.ready_files == 1
+    assert summary.skipped_files == 1
+    assert downloader.calls == 1
+
+
+def test_all_claimed_periods_fail_execution(app_config):
+    audit = fake_audit()
+    blocked = candidate(1)
+    audit.registry.claims.add(audit.registry._key(blocked))
+    pipeline, _, downloader, _ = make_pipeline(
+        app_config,
+        [blocked],
+        audit=audit,
+    )
+    selection = resolve_selection(
+        app_config,
+        mode="incremental",
+        services=["yellow"],
+        months=[1],
+    )
+
+    summary = pipeline.run(selection, execution_type="incremental")
+
+    assert summary.status == "FAILED"
+    assert summary.ready_files == 0
+    assert summary.skipped_files == 1
+    assert downloader.calls == 0
+
 def test_download_phase_collects_all_futures_after_individual_failure(app_config):
     storage = BronzeStorage(app_config.storage)
     downloader = FakeDownloader(storage, fail_months=[2])
@@ -497,10 +546,12 @@ def test_consecutive_temporary_blocks_defer_remaining_downloads(app_config):
         months=[1, 2, 3],
         workers=1,
     )
+
     summary = pipeline.run(selection, execution_type="incremental")
     manifest = Path(summary.manifest_path).read_text(encoding="utf-8")
+
     assert downloader.calls == 2
-    assert summary.status == "PARTIAL_SUCCESS"
+    assert summary.status == "FAILED"
     assert DEFERRED_REMOTE_ACCESS in manifest
 
 

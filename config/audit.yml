@@ -5,6 +5,22 @@ collections:
   coverage_snapshots: audit_coverage_snapshots
   download_attempts: audit_download_attempts
 
+filesystem:
+  enabled: true
+  root: data/audit
+  pipeline_runs_file: pipeline_runs.jsonl
+  dataset_events_file: dataset_events.jsonl
+  quality_events_file: quality_events.jsonl
+  coverage_snapshots_file: coverage_snapshots.jsonl
+  download_attempts_file: download_attempts.jsonl
+  inventory_snapshots_file: inventory_snapshots.jsonl
+  inventory_current_file: medallion_inventory.json
+  layer_roots:
+    bronze: data/bronze
+    silver: data/silver
+    gold: data/gold
+    ml: data/ml
+
 retention:
   max_dashboard_documents: 20000
 

@@ -113,6 +113,10 @@ class DownloadResult:
     remote_metadata: RemoteMetadata
     attempt_count: int = 1
     retry_count: int = 0
+    download_started_at: datetime | None = None
+    download_finished_at: datetime | None = None
+    download_duration_seconds: float | None = None
+    throughput_bytes_per_second: float | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,10 @@ class FileOutcome:
     error_message: str | None = None
     attempt_count: int = 0
     retry_count: int = 0
+    download_started_at: datetime | None = None
+    download_finished_at: datetime | None = None
+    download_duration_seconds: float | None = None
+    throughput_bytes_per_second: float | None = None
 
     def finish(self) -> None:
         self.finished_at = utc_now()
@@ -225,6 +233,9 @@ class ExecutionSummary:
     manifest_path: str
     total_download_attempts: int = 0
     total_retries: int = 0
+    total_download_seconds: float | None = None
+    average_download_mbps: float | None = None
+    error_rate: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

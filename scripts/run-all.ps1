@@ -106,7 +106,7 @@ $pipelineFailure = $null
 try {
     if ($Mode -in @("historical", "all")) {
         Assert-FreeSpace $requiredFreeGB "Bronze -> Silver -> Gold -> ML histórico"
-        Write-Host "[3/5] Ejecutando alcance histórico: Yellow/Green/FHV 2023-2025 y HVFHV 2023..." -ForegroundColor Cyan
+        Write-Host "[3/5] Ejecutando alcance histórico" -ForegroundColor Cyan
         $historicalArgs = @("run", "--rm", "pipeline", "platform-historical")
         if ($SkipML) { $historicalArgs += "--no-train-ml" }
         & docker @compose @historicalArgs

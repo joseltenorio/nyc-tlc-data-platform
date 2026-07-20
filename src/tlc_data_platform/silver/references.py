@@ -196,13 +196,41 @@ class SilverReferencePipeline:
         taxi_rows: int,
         base_rows: int,
     ) -> Path:
-        path = self._config.silver.storage.manifests_root / f"{execution_id}.json"
+        completed_at = utc_now()
+        path = (
+            self._config.silver.storage.manifests_root
+            / "references"
+            / f"{execution_id}.json"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
+        duration_seconds = None
+        if hasattr(completed_at, "__sub__"):
+            try:
+                duration_seconds = (completed_at - refreshed_at).total_seconds()
+            except (TypeError, AttributeError):
+                duration_seconds = None
         payload = {
+            "manifest_schema_version": "1.0",
+            "layer": "silver",
+            "manifest_type": "reference_refresh",
+            "summary": {
+                "execution_id": execution_id,
+                "execution_type": "reference_refresh",
+                "status": "SUCCESS",
+                "started_at": refreshed_at,
+                "finished_at": completed_at,
+                "duration_seconds": duration_seconds,
+                "source_files": 2,
+                "processed_files": 2,
+                "failed_files": 0,
+                "datasets_built": 2,
+                "rows_valid": taxi_rows + base_rows,
+                "error_rate": 0.0,
+            },
             "execution_id": execution_id,
-            "layer": "silver_reference",
             "status": "SUCCESS",
             "refreshed_at": refreshed_at,
+            "completed_at": completed_at,
             "references": [
                 {
                     "name": "taxi_zones",

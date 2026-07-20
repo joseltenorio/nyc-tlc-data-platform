@@ -3,24 +3,32 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+
     init: true
+
     command:
       - streamlit
       - run
       - dashboard/streamlit_app.py
       - --server.address=0.0.0.0
       - --server.port=8501
+
     environment:
       MONGODB_URI: ${MONGODB_URI:-mongodb://tlc_admin:tlc_admin_local@mongodb:27017/?authSource=admin}
       TLC_ENVIRONMENT: ${TLC_ENVIRONMENT:-local}
+      PYTHONPATH: /app:/app/src
+
     ports:
       - "8501:8501"
+
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data:ro
+
     depends_on:
       mongodb:
         condition: service_healthy
+
     mem_limit: ${DASHBOARD_MEMORY_LIMIT:-2g}
     cpus: ${DASHBOARD_CPU_LIMIT:-2.0}
     restart: unless-stopped

@@ -22,6 +22,9 @@ class SilverManifestWriter:
     def write(self, summary: SilverExecutionSummary) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "manifest_schema_version": "1.0",
+            "layer": "silver",
+            "manifest_type": "pipeline_execution",
             "summary": summary.to_dict(),
             "period_states": [state.to_dict() for state in self.states],
             "files": [outcome.to_dict() for outcome in self.outcomes],

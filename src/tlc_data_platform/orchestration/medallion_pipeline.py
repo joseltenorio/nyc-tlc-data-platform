@@ -39,8 +39,11 @@ def run_medallion_to_silver(
         execution_type=execution_type,
         force=force_bronze,
     )
-    if bronze.status == "FAILED":
-        return MedallionExecutionSummary("FAILED", bronze, None)
+    # Silver must only start after a complete Bronze execution. A
+    # PARTIAL_SUCCESS can contain missing, deferred or claimed periods and is
+    # therefore not a valid input boundary for the next Medallion layer.
+    if bronze.status != "SUCCESS":
+        return MedallionExecutionSummary(bronze.status, bronze, None)
     silver = run_silver_pipeline(
         config,
         selection,

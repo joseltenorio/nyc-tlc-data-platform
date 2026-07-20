@@ -20,8 +20,14 @@ data/silver/**/*.parquet
 data/silver/**/_SUCCESS
 data/silver/**/*.crc
 
-# Temporary files and manifests
+# Temporary files, manifests and append-only audit evidence
 data/tmp/**
+data/manifests/**/*.json
+data/manifests/**/*.part
+data/manifests/**/*.tmp
+data/audit/**/*.jsonl
+data/audit/**/*.json
+data/audit/**/*.tmp
 
 # Preserve only directory markers
 !data/bronze/trip_records/.gitkeep
@@ -33,8 +39,11 @@ data/tmp/**
 !data/tmp/silver/
 !data/tmp/silver/.gitkeep
 !data/manifests/
-!data/manifests/silver/
-!data/manifests/silver/.gitkeep
+!data/manifests/**/
+!data/manifests/**/.gitkeep
+!data/audit/
+!data/audit/**/
+!data/audit/**/.gitkeep
 
 # Gold runtime data
 data/gold/**/*.parquet
@@ -46,8 +55,6 @@ data/ml/**/*.parquet
 data/ml/**/_SUCCESS
 data/ml/**/*.crc
 data/models/**
-data/manifests/gold/*.json
-data/manifests/ml/*.json
 # Streamlit local secrets and caches
 .streamlit/secrets.toml
 dashboard/**/__pycache__/

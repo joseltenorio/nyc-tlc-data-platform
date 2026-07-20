@@ -16,7 +16,7 @@ def app_config(tmp_path: Path):
         bronze_root=tmp_path / "bronze" / "trip_records",
         versions_root=tmp_path / "bronze" / "versions" / "trip_records",
         temporary_root=tmp_path / "tmp",
-        manifests_root=tmp_path / "manifests",
+        manifests_root=tmp_path / "manifests" / "bronze",
         minimum_free_space_bytes=0,
     )
     download = replace(
@@ -55,6 +55,17 @@ def app_config(tmp_path: Path):
         manifests_root=tmp_path / "manifests" / "ml",
     )
     ml = replace(config.ml, storage=ml_storage)
+    audit_filesystem = replace(
+        config.audit.filesystem,
+        root=tmp_path / "audit",
+        layer_roots={
+            "bronze": storage.bronze_root,
+            "silver": silver_storage.silver_root,
+            "gold": gold_storage.gold_root,
+            "ml": ml_storage.ml_root,
+        },
+    )
+    audit = replace(config.audit, filesystem=audit_filesystem)
     return replace(
         config,
         storage=storage,
@@ -62,6 +73,7 @@ def app_config(tmp_path: Path):
         silver=silver,
         gold=gold,
         ml=ml,
+        audit=audit,
     )
 
 @pytest.fixture(scope="session")

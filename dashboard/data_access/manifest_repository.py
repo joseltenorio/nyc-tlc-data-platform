@@ -32,6 +32,8 @@ RUN_COLUMNS = [
     "trained_models",
     "failed_models",
     "error_rate",
+    "total_download_seconds",
+    "average_download_mbps",
     "manifest_path",
 ]
 
@@ -107,16 +109,21 @@ def _normalize_manifest(path: Path, root: Path) -> tuple[dict[str, Any], list[di
     failed_files = _first_number(summary, ("failed_files", "failed_datasets", "failed_models"))
     denominator = source_files
     if layer == "gold":
-        denominator = (_first_number(summary, ("datasets_built",)) or 0) + (
-            _first_number(summary, ("failed_datasets",)) or 0
-        )
+        built = _first_number(summary, ("datasets_built",))
+        failed = _first_number(summary, ("failed_datasets",))
+        denominator = built + failed if built is not None and failed is not None else None
     elif layer == "ml":
-        denominator = (_first_number(summary, ("trained_models",)) or 0) + (
-            _first_number(summary, ("failed_models",)) or 0
-        )
-    error_rate = None
-    if denominator and denominator > 0:
-        error_rate = float((failed_files or 0) / denominator)
+        trained = _first_number(summary, ("trained_models",))
+        failed = _first_number(summary, ("failed_models",))
+        denominator = trained + failed if trained is not None and failed is not None else None
+    error_rate = _first_number(summary, ("error_rate",))
+    if (
+        error_rate is None
+        and failed_files is not None
+        and denominator is not None
+        and denominator > 0
+    ):
+        error_rate = float(failed_files / denominator)
 
     row = {
         "execution_id": execution_id,
@@ -145,6 +152,8 @@ def _normalize_manifest(path: Path, root: Path) -> tuple[dict[str, Any], list[di
         "trained_models": _first_number(summary, ("trained_models",)),
         "failed_models": _first_number(summary, ("failed_models",)),
         "error_rate": error_rate,
+        "total_download_seconds": _first_number(summary, ("total_download_seconds",)),
+        "average_download_mbps": _first_number(summary, ("average_download_mbps",)),
         "manifest_path": str(path.relative_to(root.parent)),
     }
 
@@ -179,6 +188,48 @@ def _normalize_manifest(path: Path, root: Path) -> tuple[dict[str, Any], list[di
                 "source": "manifest",
             }
         )
+
+    for collection_name in ("files", "outcomes", "results"):
+        items = payload.get(collection_name)
+        if not isinstance(items, list):
+            items = summary.get(collection_name)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_status = str(item.get("status") or "").upper()
+            error_type = item.get("error_type") or item.get("type")
+            error_message = item.get("error_message") or item.get("message")
+            if item_status not in {"FAILED", "ERROR", "EXHAUSTED"} and not (
+                error_type or error_message
+            ):
+                continue
+            errors.append(
+                {
+                    "execution_id": execution_id,
+                    "layer": layer,
+                    "status": item_status or status,
+                    "error_type": error_type or "UnknownError",
+                    "error_message": error_message or "",
+                    "subject": (
+                        item.get("file_name")
+                        or item.get("dataset_name")
+                        or item.get("model_name")
+                        or item.get("period_id")
+                        or item.get("path")
+                    ),
+                    "service": item.get("service"),
+                    "year": item.get("year"),
+                    "month": item.get("month"),
+                    "occurred_at": (
+                        _parse_datetime(item.get("finished_at"))
+                        if item.get("finished_at")
+                        else row["finished_at"]
+                    ),
+                    "source": f"manifest.{collection_name}",
+                }
+            )
     return row, errors
 
 

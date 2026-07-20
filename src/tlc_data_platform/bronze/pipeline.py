@@ -478,6 +478,7 @@ class BronzePipeline:
                     "DOWNLOADING",
                     remote_metadata=remote.to_dict(),
                 )
+
                 def on_attempt(event: dict[str, Any]) -> None:
                     if audit.unified is not None:
                         audit.unified.record_download_attempt(
@@ -589,6 +590,10 @@ class BronzePipeline:
             sha256=result.sha256,
             attempt_count=result.attempt_count,
             retry_count=result.retry_count,
+            download_started_at=result.download_started_at,
+            download_finished_at=result.download_finished_at,
+            download_duration_seconds=result.download_duration_seconds,
+            throughput_bytes_per_second=result.throughput_bytes_per_second,
         )
         current = (existing or {}).get("current") or {}
         previous_sha = current.get("sha256")
@@ -664,17 +669,23 @@ class BronzePipeline:
             outcome.status == DEFERRED_REMOTE_ACCESS for outcome in outcomes
         ) + sum(item.status == DEFERRED_REMOTE_ACCESS for item in availability)
         failed_probes = sum(item.status == "FAILED_TO_PROBE" for item in availability)
-        successes = sum(
+        completed = sum(
             outcome.status in {"READY", "SKIPPED_UNCHANGED", "DRY_RUN"}
             for outcome in outcomes
         )
+        claimed = sum(
+            outcome.status == "SKIPPED_CLAIMED" for outcome in outcomes
+        )
+        available = sum(item.status == "AVAILABLE" for item in availability)
+        incomplete = completed < available
+
+        # SUCCESS means that every remotely available period has a usable result.
+        # A claim is not evidence of an existing file: it only means that another
+        # execution owns (or previously owned) the period. Treating claimed files
+        # as successful allowed Silver to start with an incomplete Bronze layer.
         status = "SUCCESS"
-        if failed and successes:
-            status = "PARTIAL_SUCCESS"
-        elif failed:
-            status = "FAILED"
-        elif deferred or failed_probes:
-            status = "PARTIAL_SUCCESS"
+        if failed or deferred or failed_probes or claimed or incomplete:
+            status = "PARTIAL_SUCCESS" if completed else "FAILED"
         summary = self._build_summary(
             execution_id,
             execution_type,
@@ -721,7 +732,7 @@ class BronzePipeline:
                 operation="download_validate_publish",
                 status=outcome.status,
                 path=outcome.local_path,
-                parquet_files=physical.parquet_files if physical else 0,
+                parquet_files=physical.parquet_files if physical else None,
                 rows=(
                     validation.parquet_num_rows
                     if validation is not None
@@ -740,6 +751,10 @@ class BronzePipeline:
                     "attempt_count": outcome.attempt_count,
                     "retry_count": outcome.retry_count,
                     "schema_hash": validation.schema_hash if validation else None,
+                    "download_started_at": outcome.download_started_at,
+                    "download_finished_at": outcome.download_finished_at,
+                    "download_duration_seconds": outcome.download_duration_seconds,
+                    "throughput_bytes_per_second": outcome.throughput_bytes_per_second,
                 },
             )
             if outcome.status == "READY" and validation is not None:
@@ -860,6 +875,9 @@ class BronzePipeline:
                 "download_attempts": summary.total_download_attempts,
                 "download_retries": summary.total_retries,
                 "bytes_downloaded": summary.total_bytes_downloaded,
+                "download_seconds": summary.total_download_seconds,
+                "average_download_mbps": summary.average_download_mbps,
+                "error_rate": summary.error_rate,
             },
         )
 
@@ -876,6 +894,25 @@ class BronzePipeline:
         outcomes: list[FileOutcome],
         manifest_path: str,
     ) -> ExecutionSummary:
+        attempted_outcomes = [
+            outcome for outcome in outcomes if outcome.attempt_count > 0
+        ]
+        recorded_durations = [
+            outcome.download_duration_seconds for outcome in attempted_outcomes
+        ]
+        total_download_seconds = (
+            sum(float(value) for value in recorded_durations if value is not None)
+            if attempted_outcomes and all(value is not None for value in recorded_durations)
+            else None
+        )
+        total_bytes_downloaded = sum(outcome.bytes_downloaded or 0 for outcome in outcomes)
+        attempted_files = sum(outcome.status in {"READY", "FAILED"} for outcome in outcomes)
+        failed_files = sum(outcome.status == "FAILED" for outcome in outcomes)
+        average_download_mbps = (
+            (total_bytes_downloaded * 8) / total_download_seconds / 1_000_000
+            if total_download_seconds is not None and total_download_seconds > 0
+            else None
+        )
         return ExecutionSummary(
             execution_id=execution_id,
             execution_type=execution_type,
@@ -899,7 +936,7 @@ class BronzePipeline:
                 outcome.status in {"SKIPPED_UNCHANGED", "SKIPPED_CLAIMED"}
                 for outcome in outcomes
             ),
-            failed_files=sum(outcome.status == "FAILED" for outcome in outcomes),
+            failed_files=failed_files,
             failed_probe_periods=sum(
                 item.status == "FAILED_TO_PROBE" for item in availability
             ),
@@ -909,12 +946,13 @@ class BronzePipeline:
             not_applicable_periods=sum(
                 item.status == "NOT_APPLICABLE" for item in availability
             ),
-            total_bytes_downloaded=sum(
-                outcome.bytes_downloaded or 0 for outcome in outcomes
-            ),
+            total_bytes_downloaded=total_bytes_downloaded,
             manifest_path=manifest_path,
             total_download_attempts=sum(outcome.attempt_count for outcome in outcomes),
             total_retries=sum(outcome.retry_count for outcome in outcomes),
+            total_download_seconds=total_download_seconds,
+            average_download_mbps=average_download_mbps,
+            error_rate=(failed_files / attempted_files if attempted_files else None),
         )
 
     @staticmethod
@@ -931,6 +969,9 @@ class BronzePipeline:
         outcome.error_message = str(exc)
         outcome.attempt_count = int(getattr(exc, "attempt_count", 0) or 0)
         outcome.retry_count = int(getattr(exc, "retry_count", 0) or 0)
+        outcome.download_started_at = getattr(exc, "download_started_at", None)
+        outcome.download_finished_at = getattr(exc, "download_finished_at", None)
+        outcome.download_duration_seconds = getattr(exc, "download_duration_seconds", None)
         if isinstance(exc, requests.HTTPError) and exc.response is not None:
             outcome.remote_metadata = RemoteMetadata(
                 available=False,

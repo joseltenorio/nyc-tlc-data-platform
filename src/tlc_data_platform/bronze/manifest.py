@@ -35,6 +35,9 @@ class ManifestWriter:
     def write(self, summary: ExecutionSummary) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "manifest_schema_version": "1.0",
+            "layer": "bronze",
+            "manifest_type": "pipeline_execution",
             "summary": summary.to_dict(),
             "availability": [item.to_dict() for item in self._availability],
             "files": [item.to_dict() for item in self._outcomes],

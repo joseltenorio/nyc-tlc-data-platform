@@ -20,12 +20,12 @@ execution:
 
 spark:
   app_name: nyc-tlc-data-platform-gold
-  master: local[2]
+  master: local[6]
   log_level: WARN
-  driver_memory: 3g
-  shuffle_partitions: 512
+  driver_memory: 7g
+  shuffle_partitions: 256
   local_dir: data/tmp/spark/gold
-  max_temp_bytes: 42949672960
+  max_temp_bytes: 32212254720
   minimum_free_space_bytes: 32212254720
 
 # Nombres físicos. Se mantienen centralizados para que Gold y Streamlit no

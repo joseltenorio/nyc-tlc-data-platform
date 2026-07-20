@@ -52,7 +52,7 @@ class GoldExecutionSummary:
     selected_months: list[int]
     selected_services: list[str]
     source_partitions: int
-    source_rows: int
+    source_rows: int | None
     datasets_built: int
     failed_datasets: int
     results: list[GoldDatasetResult]

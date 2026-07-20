@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -74,11 +75,15 @@ class FileDownloader:
         max_attempts = self._config.max_retries + 1
         backoff = self._config.initial_backoff_seconds
         last_error: Exception | None = None
+        download_started_at = datetime.now(timezone.utc)
+        download_started_perf = time.perf_counter()
 
         for attempt in range(1, max_attempts + 1):
             self._assert_disk_space(remote_metadata)
             response: Any | None = None
             temporary.unlink(missing_ok=True)
+            attempt_started_at = datetime.now(timezone.utc)
+            attempt_started_perf = time.perf_counter()
             try:
                 # FileDownloader owns the retry loop. Disable HttpClient's inner
                 # retries so one audit event equals one complete transfer attempt.
@@ -127,13 +132,24 @@ class FileDownloader:
                     if self._config.calculate_sha256
                     else ""
                 )
+                attempt_finished_at = datetime.now(timezone.utc)
+                attempt_duration = max(0.0, time.perf_counter() - attempt_started_perf)
+                attempt_throughput = size / attempt_duration if attempt_duration > 0 else None
                 self._emit_attempt(
                     attempt_callback,
                     attempt_number=attempt,
                     max_attempts=max_attempts,
                     outcome="SUCCESS",
                     status_code=status_code,
+                    started_at=attempt_started_at,
+                    finished_at=attempt_finished_at,
+                    duration_seconds=attempt_duration,
+                    bytes_downloaded=size,
+                    expected_bytes=remote_metadata.content_length,
+                    throughput_bytes_per_second=attempt_throughput,
                 )
+                download_finished_at = attempt_finished_at
+                download_duration = max(0.0, time.perf_counter() - download_started_perf)
                 return DownloadResult(
                     candidate=candidate,
                     path=temporary,
@@ -142,6 +158,12 @@ class FileDownloader:
                     remote_metadata=effective_remote_metadata,
                     attempt_count=attempt,
                     retry_count=attempt - 1,
+                    download_started_at=download_started_at,
+                    download_finished_at=download_finished_at,
+                    download_duration_seconds=download_duration,
+                    throughput_bytes_per_second=(
+                        size / download_duration if download_duration > 0 else None
+                    ),
                 )
             except Exception as exc:
                 last_error = exc
@@ -150,6 +172,9 @@ class FileDownloader:
                 delay = None
                 if not final:
                     delay = self._retry_delay(response, backoff)
+                attempt_finished_at = datetime.now(timezone.utc)
+                attempt_duration = max(0.0, time.perf_counter() - attempt_started_perf)
+                partial_bytes = temporary.stat().st_size if temporary.is_file() else 0
                 self._emit_attempt(
                     attempt_callback,
                     attempt_number=attempt,
@@ -164,11 +189,26 @@ class FileDownloader:
                     retry_delay_seconds=delay,
                     error_type=type(exc).__name__,
                     error_message=str(exc)[:2000],
+                    started_at=attempt_started_at,
+                    finished_at=attempt_finished_at,
+                    duration_seconds=attempt_duration,
+                    bytes_downloaded=partial_bytes,
+                    expected_bytes=remote_metadata.content_length,
+                    throughput_bytes_per_second=(
+                        partial_bytes / attempt_duration if attempt_duration > 0 else None
+                    ),
                 )
                 temporary.unlink(missing_ok=True)
                 if final:
                     setattr(exc, "attempt_count", attempt)
                     setattr(exc, "retry_count", attempt - 1)
+                    setattr(exc, "download_started_at", download_started_at)
+                    setattr(exc, "download_finished_at", attempt_finished_at)
+                    setattr(
+                        exc,
+                        "download_duration_seconds",
+                        max(0.0, time.perf_counter() - download_started_perf),
+                    )
                     raise
                 time.sleep(float(delay or 0.0))
                 backoff = min(
@@ -255,6 +295,12 @@ class FileDownloader:
         retry_delay_seconds: float | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        duration_seconds: float | None = None,
+        bytes_downloaded: int | None = None,
+        expected_bytes: int | None = None,
+        throughput_bytes_per_second: float | None = None,
     ) -> None:
         if callback is None:
             return
@@ -267,5 +313,11 @@ class FileDownloader:
                 "retry_delay_seconds": retry_delay_seconds,
                 "error_type": error_type,
                 "error_message": error_message,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_seconds": duration_seconds,
+                "bytes_downloaded": bytes_downloaded,
+                "expected_bytes": expected_bytes,
+                "throughput_bytes_per_second": throughput_bytes_per_second,
             }
         )

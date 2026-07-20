@@ -15,10 +15,10 @@ x-pipeline-common: &pipeline-common
   volumes:
     - ./config:/app/config:ro
     - ./data:/app/data
-  mem_limit: ${PIPELINE_MEMORY_LIMIT:-5g}
-  cpus: ${PIPELINE_CPU_LIMIT:-2.0}
+  mem_limit: ${PIPELINE_MEMORY_LIMIT:-11g}
+  cpus: ${PIPELINE_CPU_LIMIT:-6.0}
   pids_limit: 1024
-  stop_grace_period: 30s
+  stop_grace_period: 60s
 
 services:
   mongodb:

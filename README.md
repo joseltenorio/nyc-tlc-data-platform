@@ -137,28 +137,35 @@ El modelo HVFHV usa cortes temporales dentro de 2023. Si un modelo no tiene dato
 
 ## Auditoría unificada
 
-MongoDB mantiene las colecciones específicas de cada capa y un contrato común para Streamlit:
+Cada hecho emitido por el contrato unificado de auditoría se conserva en dos destinos con los mismos identificadores:
+
+1. MongoDB, para consulta operacional.
+2. JSONL append-only, para evidencia independiente y lectura del dashboard aunque MongoDB no responda.
 
 ```text
-audit_pipeline_runs
-audit_dataset_events
-audit_quality_events
-audit_coverage_snapshots
-audit_download_attempts
+data/audit/<layer>/pipeline_runs.jsonl
+data/audit/<layer>/dataset_events.jsonl
+data/audit/<layer>/quality_events.jsonl
+data/audit/<layer>/coverage_snapshots.jsonl
+data/audit/bronze/download_attempts.jsonl
+data/audit/inventory/inventory_snapshots.jsonl
+data/audit/inventory/medallion_inventory.json
 ```
 
-El dashboard de auditoría muestra:
+El inventario se obtiene escaneando físicamente los Parquet de Bronze, Silver, Gold y ML. El
+dashboard no genera filas, tiempos, porcentajes ni conteos simulados. Muestra:
 
-- corridas por capa y estado;
-- duración y relación padre/hijo del pipeline completo;
-- número de Parquet leídos/publicados por capa;
-- filas y bytes registrados;
+- corridas por capa, estado, duración y relación padre/hijo;
+- número actual de Parquet, datasets y bytes por capa;
+- eventos físicos leídos, publicados, omitidos o fallidos;
 - periodos esperados, listos, no publicados, no aplicables y ausentes;
-- reglas de calidad y reconciliaciones;
-- errores consolidados;
-- intentos y reintentos HTTP.
+- reglas de calidad, reconciliaciones y filas afectadas;
+- tiempo real de descarga, bytes transferidos, velocidad efectiva, reintentos y error final;
+- errores de corrida, dataset, regla e intento HTTP.
 
-Los manifiestos JSON permanecen como respaldo cuando MongoDB no está disponible.
+Los manifests de compatibilidad se escriben por capa en
+`data/manifests/{bronze,silver,gold,ml}/`. Los refrescos de referencias Silver usan
+`data/manifests/silver/references/` y conservan métricas reales de archivos, filas y duración.
 
 ## Rutas principales
 
@@ -168,7 +175,11 @@ data/silver/                    datasets curados, rechazados y trips_master
 data/gold/                      dimensiones, hechos, marts y features
 data/ml/                        predicciones y métricas
 data/models/                    modelos Spark persistidos
-data/manifests/                 manifiestos por capa
+data/manifests/bronze/          manifests de ingestión
+data/manifests/silver/          manifests de curación
+data/manifests/gold/            manifests dimensionales
+data/manifests/ml/              manifests de entrenamiento
+data/audit/                     eventos JSONL e inventario físico
 data/tmp/spark/                 spill temporal visible y limitado
 ```
 
